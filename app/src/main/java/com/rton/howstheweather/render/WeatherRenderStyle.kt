@@ -7,6 +7,19 @@ import kotlin.math.pow
 
 enum class RenderTheme { LIGHT, DARK }
 
+object CloudEnhancedPalette {
+    fun colors(theme: RenderTheme): List<Int> = when (theme) {
+        RenderTheme.DARK -> listOf(
+            0xFF12082F, 0xFF32105F, 0xFF5A167A, 0xFF84206B,
+            0xFFB83255, 0xFFE85B2A, 0xFFF6C945,
+        )
+        RenderTheme.LIGHT -> listOf(
+            0xFF0B0624, 0xFF280B50, 0xFF4B1167, 0xFF74195F,
+            0xFFA5294B, 0xFFD94A1F, 0xFFE8AD20,
+        )
+    }.map(Long::toInt)
+}
+
 data class ColorAnchor(val position: Float, val argb: Int)
 
 data class WeatherRenderStyle(
@@ -21,6 +34,12 @@ data class WeatherRenderStyle(
     fun colorFor(value: Float): Int {
         if (!value.isFinite() || value < valueStops.first()) return Color.TRANSPARENT
         val normalized = normalize(value)
+        if (unit == WeatherUnit.LUMINANCE) {
+            val index = (normalized * 255f).toInt().coerceIn(0, 255)
+            val source = colorLut[index]
+            val alpha = ((0.18f + normalized * 0.82f) * opacity * 255f).toInt().coerceIn(0, 255)
+            return Color.argb(alpha, Color.red(source), Color.green(source), Color.blue(source))
+        }
         val index = (normalized * 255f).toInt().coerceIn(0, 255)
         val source = colorLut[index]
         return Color.argb(
@@ -32,13 +51,16 @@ data class WeatherRenderStyle(
     fun normalize(value: Float): Float {
         if (value <= valueStops.first()) return 0.08f
         if (value >= valueStops.last()) return 1f
-        val segment = (0 until valueStops.lastIndex).first { value <= valueStops[it + 1] }
+        var segment = 0
+        while (segment < valueStops.lastIndex - 1 && value > valueStops[segment + 1]) segment++
         val local = (value - valueStops[segment]) / (valueStops[segment + 1] - valueStops[segment])
-        val positions = floatArrayOf(0.08f, 0.25f, 0.42f, 0.58f, 0.72f, 0.86f, 1f)
-        return positions[segment] + (positions[segment + 1] - positions[segment]) * local
+        return NORMALIZED_POSITIONS[segment] +
+            (NORMALIZED_POSITIONS[segment + 1] - NORMALIZED_POSITIONS[segment]) * local
     }
 
     companion object {
+        private val NORMALIZED_POSITIONS = floatArrayOf(0.08f, 0.25f, 0.42f, 0.58f, 0.72f, 0.86f, 1f)
+
         fun rain(theme: RenderTheme, opacity: Float = 0.76f) = create(
             theme = theme,
             unit = WeatherUnit.MILLIMETERS_PER_HOUR,
@@ -55,6 +77,14 @@ data class WeatherRenderStyle(
             opacity = opacity,
         )
 
+        fun twelveHourRain(theme: RenderTheme, opacity: Float = 0.76f) = create(
+            theme = theme,
+            unit = WeatherUnit.MILLIMETERS_TWELVE_HOURS,
+            stops = floatArrayOf(0.1f, 0.5f, 2.5f, 10f, 25f, 50f, 100f),
+            contours = floatArrayOf(2.5f, 10f, 40f),
+            opacity = opacity,
+        )
+
         fun radar(theme: RenderTheme, opacity: Float = 0.76f) = create(
             theme = theme,
             unit = WeatherUnit.DBZ,
@@ -64,13 +94,10 @@ data class WeatherRenderStyle(
         )
 
         fun cloud(theme: RenderTheme, opacity: Float = 0.62f): WeatherRenderStyle {
-            val colors = if (theme == RenderTheme.DARK) {
-                listOf("#233944", "#526D78", "#7896A1", "#A7BDC5", "#CAD8DD", "#E5ECEE", "#FFFFFF")
-            } else {
-                listOf("#6B7F87", "#84969D", "#9DACB2", "#B8C4C8", "#D0D8DB", "#E5E9EA", "#FFFFFF")
-            }
             val positions = floatArrayOf(0.08f, 0.25f, 0.42f, 0.58f, 0.72f, 0.86f, 1f)
-            val anchors = colors.mapIndexed { index, hex -> ColorAnchor(positions[index], Color.parseColor(hex)) }
+            val anchors = CloudEnhancedPalette.colors(theme).mapIndexed { index, color ->
+                ColorAnchor(positions[index], color)
+            }
             return WeatherRenderStyle(
                 theme = theme,
                 unit = WeatherUnit.LUMINANCE,

@@ -29,4 +29,61 @@ class WeatherGridTest {
         val missing = grid.copy(values = floatArrayOf(0f, Float.NaN, 20f, 30f))
         assertNull(missing.sample(GeoPoint(1.0, 1.0)))
     }
+
+    @Test fun `longitude wraps across antimeridian for satellite grids`() {
+        val wrapped = grid.copy(bounds = GeoBounds(0.0, 60.0, 2.0, 240.0))
+        assertEquals(
+            wrapped.sample(GeoPoint(1.0, 181.0))!!,
+            wrapped.sample(GeoPoint(1.0, -179.0))!!,
+            .0001f,
+        )
+    }
+
+    @Test fun `cloud coverage switches with zoom using hysteresis`() {
+        val taiwan = GeoBounds(19.1, 115.9, 28.3, 126.1)
+        val taipei = GeoPoint(25.0, 121.5)
+
+        assertEquals(
+            CloudCoverage.TAIWAN,
+            CloudCoverageSelector.select(CloudCoverage.EAST_ASIA, 7.25f, taipei, taiwan),
+        )
+        assertEquals(
+            CloudCoverage.TAIWAN,
+            CloudCoverageSelector.select(CloudCoverage.TAIWAN, 7.0f, taipei, taiwan),
+        )
+        assertEquals(
+            CloudCoverage.EAST_ASIA,
+            CloudCoverageSelector.select(CloudCoverage.TAIWAN, 6.75f, taipei, taiwan),
+        )
+    }
+
+    @Test fun `cloud coverage stays global outside taiwan product bounds`() {
+        assertEquals(
+            CloudCoverage.EAST_ASIA,
+            CloudCoverageSelector.select(
+                current = CloudCoverage.TAIWAN,
+                zoom = 12f,
+                center = GeoPoint(35.0, 139.0),
+                taiwanBounds = GeoBounds(19.1, 115.9, 28.3, 126.1),
+            ),
+        )
+    }
+
+    @Test fun `radar coverage switches between wide and local numerical grids`() {
+        val localBounds = GeoBounds(20.5, 118.0, 26.5, 124.0)
+        val taipei = GeoPoint(25.0, 121.5)
+
+        assertEquals(
+            RadarCoverage.LOCAL,
+            RadarCoverageSelector.select(RadarCoverage.WIDE, 7.25f, taipei, localBounds),
+        )
+        assertEquals(
+            RadarCoverage.LOCAL,
+            RadarCoverageSelector.select(RadarCoverage.LOCAL, 7.0f, taipei, localBounds),
+        )
+        assertEquals(
+            RadarCoverage.WIDE,
+            RadarCoverageSelector.select(RadarCoverage.LOCAL, 12f, GeoPoint(35.0, 139.0), localBounds),
+        )
+    }
 }

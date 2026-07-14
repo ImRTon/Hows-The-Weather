@@ -2,6 +2,8 @@ package com.rton.howstheweather.domain
 
 import java.time.Instant
 
+const val DEFAULT_MAP_ZOOM = 12.075137f
+
 data class GeoPoint(val latitude: Double, val longitude: Double)
 
 data class GeoBounds(
@@ -14,7 +16,7 @@ data class GeoBounds(
         point.latitude in south..north && point.longitude in west..east
 }
 
-enum class WeatherUnit { DBZ, MILLIMETERS_PER_HOUR, MILLIMETERS_ONE_HOUR, LUMINANCE }
+enum class WeatherUnit { DBZ, MILLIMETERS_PER_HOUR, MILLIMETERS_ONE_HOUR, MILLIMETERS_TWELVE_HOURS, LUMINANCE }
 
 data class WeatherGrid(
     val width: Int,
@@ -34,30 +36,75 @@ data class WeatherGrid(
 
     fun valueAt(x: Int, y: Int): Float = values[y * width + x]
 
-    fun sample(point: GeoPoint): Float? {
-        if (!bounds.contains(point)) return null
-        val fx = ((point.longitude - bounds.west) / (bounds.east - bounds.west) * (width - 1))
+    fun sample(point: GeoPoint): Float? = sample(point.latitude, point.longitude)
+
+    fun sample(latitude: Double, longitude: Double): Float? {
+        val gridLongitude = if (bounds.east > 180.0 && longitude < bounds.west) longitude + 360.0 else longitude
+        if (latitude !in bounds.south..bounds.north || gridLongitude !in bounds.west..bounds.east) return null
+        val fx = ((gridLongitude - bounds.west) / (bounds.east - bounds.west) * (width - 1))
             .coerceIn(0.0, (width - 1).toDouble())
-        val fy = ((bounds.north - point.latitude) / (bounds.north - bounds.south) * (height - 1))
+        val fy = ((bounds.north - latitude) / (bounds.north - bounds.south) * (height - 1))
             .coerceIn(0.0, (height - 1).toDouble())
         val x0 = fx.toInt().coerceAtMost(width - 2)
         val y0 = fy.toInt().coerceAtMost(height - 2)
         val tx = (fx - x0).toFloat()
         val ty = (fy - y0).toFloat()
-        val samples = floatArrayOf(
-            valueAt(x0, y0), valueAt(x0 + 1, y0),
-            valueAt(x0, y0 + 1), valueAt(x0 + 1, y0 + 1),
-        )
-        if (samples.any { !it.isFinite() || it == missingValue }) return null
-        val top = samples[0] + (samples[1] - samples[0]) * tx
-        val bottom = samples[2] + (samples[3] - samples[2]) * tx
+        // This is called once per rendered tile pixel. Keep it allocation-free.
+        val topLeft = valueAt(x0, y0)
+        val topRight = valueAt(x0 + 1, y0)
+        val bottomLeft = valueAt(x0, y0 + 1)
+        val bottomRight = valueAt(x0 + 1, y0 + 1)
+        if (!topLeft.isFinite() || !topRight.isFinite() || !bottomLeft.isFinite() || !bottomRight.isFinite() ||
+            topLeft == missingValue || topRight == missingValue || bottomLeft == missingValue || bottomRight == missingValue
+        ) return null
+        val top = topLeft + (topRight - topLeft) * tx
+        val bottom = bottomLeft + (bottomRight - bottomLeft) * tx
         return top + (bottom - top) * ty
     }
 }
 
-enum class PrimaryLayer { RADAR_RAIN, CLOUD }
+enum class PrimaryLayer { RADAR_RAIN, ONE_HOUR_RAIN, CLOUD }
+enum class CloudCoverage { EAST_ASIA, TAIWAN }
+enum class RadarCoverage { WIDE, LOCAL }
+
+object CloudCoverageSelector {
+    private const val TAIWAN_ENTER_ZOOM = 7.25f
+    private const val TAIWAN_EXIT_ZOOM = 6.75f
+
+    fun select(
+        current: CloudCoverage,
+        zoom: Float,
+        center: GeoPoint,
+        taiwanBounds: GeoBounds?,
+    ): CloudCoverage {
+        if (taiwanBounds == null || !taiwanBounds.contains(center)) return CloudCoverage.EAST_ASIA
+        return when (current) {
+            CloudCoverage.EAST_ASIA -> if (zoom >= TAIWAN_ENTER_ZOOM) CloudCoverage.TAIWAN else current
+            CloudCoverage.TAIWAN -> if (zoom <= TAIWAN_EXIT_ZOOM) CloudCoverage.EAST_ASIA else current
+        }
+    }
+}
+
+object RadarCoverageSelector {
+    private const val LOCAL_ENTER_ZOOM = 7.25f
+    private const val LOCAL_EXIT_ZOOM = 6.75f
+
+    fun select(
+        current: RadarCoverage,
+        zoom: Float,
+        center: GeoPoint,
+        localBounds: GeoBounds?,
+    ): RadarCoverage {
+        if (localBounds == null || !localBounds.contains(center)) return RadarCoverage.WIDE
+        return when (current) {
+            RadarCoverage.WIDE -> if (zoom >= LOCAL_ENTER_ZOOM) RadarCoverage.LOCAL else current
+            RadarCoverage.LOCAL -> if (zoom <= LOCAL_EXIT_ZOOM) RadarCoverage.WIDE else current
+        }
+    }
+}
 enum class PanelAnchor { DECISION, BALANCED, MAP }
 enum class ThemePreference { SYSTEM, LIGHT, DARK }
+enum class AppDestination { NOW, FORECAST, PRECIPITATION }
 enum class RainState { DRY, LIGHT, MODERATE, HEAVY, EXTREME, UNAVAILABLE }
 
 data class TargetLocation(
@@ -67,6 +114,39 @@ data class TargetLocation(
 )
 
 data class ForecastPoint(val minutesFromNow: Int, val millimetersPerHour: Float?)
+
+data class AreaForecastPeriod(
+    val startAt: Instant,
+    val endAt: Instant,
+    val precipitationProbabilityPercent: Int?,
+    val minimumTemperatureCelsius: Int?,
+    val maximumTemperatureCelsius: Int?,
+    val weatherDescription: String,
+    val weatherCode: String?,
+    val relativeHumidityPercent: Int? = null,
+)
+
+data class AreaForecast(
+    val target: GeoPoint,
+    val areaCoordinate: GeoPoint,
+    val countyName: String,
+    val districtName: String,
+    val periods: List<AreaForecastPeriod>,
+    val sourceId: String,
+    val isDemo: Boolean = false,
+) {
+    val displayName: String
+        get() = if (districtName.startsWith(countyName)) districtName else countyName + districtName
+}
+
+data class AirQualityObservation(
+    val stationName: String,
+    val coordinate: GeoPoint,
+    val aqi: Int,
+    val status: String,
+    val primaryPollutant: String?,
+    val observedAt: Instant,
+)
 
 data class ForecastDecision(
     val state: RainState,
@@ -95,6 +175,14 @@ data class LayerSelection(
 data class HomeUiState(
     val target: TargetLocation,
     val decision: ForecastDecision,
+    val areaForecast: AreaForecast? = null,
+    val areaForecastLoading: Boolean = false,
+    val weeklyForecast: AreaForecast? = null,
+    val weeklyForecastLoading: Boolean = false,
+    val airQuality: AirQualityObservation? = null,
+    val airQualityLoading: Boolean = false,
+    val airQualityUnavailableReason: String? = null,
+    val destination: AppDestination = AppDestination.NOW,
     val selectedMinute: Int = 0,
     val panelAnchor: PanelAnchor = PanelAnchor.BALANCED,
     val layers: LayerSelection = LayerSelection(),
@@ -102,7 +190,18 @@ data class HomeUiState(
     val legendExpanded: Boolean = false,
     val themePreference: ThemePreference = ThemePreference.SYSTEM,
     val activeGrid: WeatherGrid? = null,
+    val quantitativeRainGrid: WeatherGrid? = null,
+    val quantitativeForecastFrames: List<WeatherGrid> = emptyList(),
+    val quantitativeForecastIndex: Int = 0,
+    val mapCenter: GeoPoint = target.coordinate,
+    val mapZoom: Float = DEFAULT_MAP_ZOOM,
+    val cloudCoverage: CloudCoverage = CloudCoverage.EAST_ASIA,
+    val radarCoverage: RadarCoverage = RadarCoverage.WIDE,
+    val windGrid: WindGrid? = null,
     val winds: List<WindObservation> = emptyList(),
+    val windsAreDemo: Boolean = false,
+    val windProvenance: WindProvenance = WindProvenance.UNAVAILABLE,
+    val isUpdating: Boolean = false,
     val reminderScheduled: Boolean = false,
     val message: String? = null,
 )

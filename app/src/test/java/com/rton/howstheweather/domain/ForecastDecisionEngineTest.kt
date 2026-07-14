@@ -49,6 +49,14 @@ class ForecastDecisionEngineTest {
         assertEquals(RainState.MODERATE, result.state)
         assertNull(result.eventWindow)
         assertEquals(listOf(ForecastPoint(60, 6.4f)), result.series)
+        assertEquals("預報時間範圍：現在至 +60 分鐘", result.detail)
+    }
+
+    @Test fun `stale hourly accumulation is explicitly labelled`() {
+        val result = engine.evaluateHourlyAccumulation(6.4f, issuedAt, issuedAt.plusSeconds(31 * 60L))
+
+        assertEquals(true, result.isStale)
+        assertEquals("資料已超過 30 分鐘，正在取得最新一小時預報", result.detail)
     }
 
     private fun series(vararg values: Float?) = values.mapIndexed { index, value -> ForecastPoint(index * 10, value) }

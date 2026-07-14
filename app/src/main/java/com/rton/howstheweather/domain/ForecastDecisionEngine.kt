@@ -17,12 +17,16 @@ class ForecastDecisionEngine {
         val headline = if (state == RainState.DRY) {
             "未來一小時暫無明顯降雨"
         } else {
-            "未來一小時預估累積 ${formatMillimeters(millimeters)} mm"
+            "未來一小時${label(state)}，預估累積 ${formatMillimeters(millimeters)} mm"
         }
         return ForecastDecision(
             state = state,
             headline = headline,
-            detail = "CWA 官方一小時累積雨量；此產品不提供分鐘級開始或轉小時間",
+            detail = if (stale) {
+                "資料已超過 30 分鐘，正在取得最新一小時預報"
+            } else {
+                "預報時間範圍：現在至 +60 分鐘"
+            },
             eventWindow = null,
             series = listOf(ForecastPoint(60, millimeters)),
             issuedAt = issuedAt,
