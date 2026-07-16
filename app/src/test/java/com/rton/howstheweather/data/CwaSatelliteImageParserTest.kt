@@ -111,4 +111,31 @@ class CwaSatelliteImageParserTest {
 
         assertTrue(maxOf(grid.width, grid.height) <= 8)
     }
+
+    @Test fun `Taiwan product respects its reduced grid dimension and exposes cancellation rows`() {
+        val metadata = CwaSatelliteImageMetadata(
+            bounds = com.rton.howstheweather.domain.GeoBounds(
+                19.100625745,
+                115.976888855,
+                28.29937425,
+                126.02300114,
+            ),
+            observedAt = java.time.Instant.parse("2026-07-14T00:00:00Z"),
+            productUrl = "https://example.test/taiwan.jpg",
+        )
+        var cancellationChecks = 0
+
+        val grid = parser.toGrid(
+            metadata = metadata,
+            width = 32,
+            height = 24,
+            argbPixels = IntArray(32 * 24) { 0xff808080.toInt() },
+            sourceId = "O-C0042-004",
+            maxGridDimension = 8,
+            checkCancelled = { cancellationChecks++ },
+        )
+
+        assertTrue(maxOf(grid.width, grid.height) <= 8)
+        assertEquals(grid.height, cancellationChecks)
+    }
 }

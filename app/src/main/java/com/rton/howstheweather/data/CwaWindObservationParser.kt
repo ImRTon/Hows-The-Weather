@@ -2,7 +2,7 @@ package com.rton.howstheweather.data
 
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.WindObservation
-import java.time.Instant
+import java.time.OffsetDateTime
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -61,7 +61,7 @@ class CwaWindObservationParser {
         }
         if (speed < 0f || direction !in 0f..360f) return null to Rejection.WIND
         val observedAt = runCatching {
-            Instant.parse(station.getJSONObject("ObsTime").getString("DateTime"))
+            OffsetDateTime.parse(station.getJSONObject("ObsTime").getString("DateTime")).toInstant()
         }.getOrNull() ?: return null to Rejection.TIME
         return WindObservation(
             stationName = station.optString("StationName", station.optString("StationId", "測站")),

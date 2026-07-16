@@ -9,8 +9,8 @@ class ForecastDecisionEngine {
         issuedAt: Instant,
         now: Instant = Instant.now(),
     ): ForecastDecision {
-        if (millimeters == null || !millimeters.isFinite()) {
-            return unavailable(listOf(ForecastPoint(60, null)), issuedAt)
+        if (millimeters == null || !millimeters.isFinite() || millimeters < 0f) {
+            return unavailableHourly(issuedAt)
         }
         val state = classify(millimeters)
         val stale = Duration.between(issuedAt, now).toMinutes() > 30
@@ -118,6 +118,16 @@ class ForecastDecisionEngine {
         detail = "找不到目標位置的有效數值格點",
         eventWindow = null,
         series = series,
+        issuedAt = issuedAt,
+        isStale = true,
+    )
+
+    private fun unavailableHourly(issuedAt: Instant) = ForecastDecision(
+        state = RainState.UNAVAILABLE,
+        headline = "應該不會下雨",
+        detail = "未取得有效的未來一小時累積降雨資料",
+        eventWindow = null,
+        series = listOf(ForecastPoint(60, null)),
         issuedAt = issuedAt,
         isStale = true,
     )

@@ -1,6 +1,7 @@
 package com.rton.howstheweather.data
 
 import com.rton.howstheweather.domain.GeoPoint
+import com.rton.howstheweather.domain.GeoBounds
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.nio.ByteBuffer
@@ -43,8 +44,50 @@ class CwaGrib2WindParserTest {
         assertEquals(5f, sampled.northMetersPerSecond, 0.001f)
     }
 
-    private fun message(parameter: Int, values: ByteArray): ByteArray {
-        require(values.size == 4)
+    @Test
+    fun `cropped decode reads only requested packed cells and preserves samples`() {
+        val width = 20
+        val height = 20
+        val values = ByteArray(width * height) { (it % 251).toByte() }
+        val message = message(parameter = 2, values = values, width = width, height = height)
+        val full = parser.decode(message)
+        val fullGrid = full.definition.combine(
+            east = full.values,
+            north = FloatArray(full.values.size),
+            validAt = full.validAt,
+            sourceId = "TEST-FULL",
+        )
+        val center = fullGrid.coordinateAt(width / 2, height / 2)
+        val bounds = GeoBounds(
+            south = center.latitude - 0.01,
+            west = center.longitude - 0.01,
+            north = center.latitude + 0.01,
+            east = center.longitude + 0.01,
+        )
+
+        val cropped = parser.decode(message, bounds)
+        val croppedGrid = cropped.definition.combine(
+            east = cropped.values,
+            north = FloatArray(cropped.values.size),
+            validAt = cropped.validAt,
+            sourceId = "TEST-CROPPED",
+        )
+
+        assertEquals(true, cropped.values.size < full.values.size)
+        assertEquals(
+            fullGrid.sample(center)!!.eastMetersPerSecond,
+            croppedGrid.sample(center)!!.eastMetersPerSecond,
+            0.001f,
+        )
+    }
+
+    private fun message(
+        parameter: Int,
+        values: ByteArray,
+        width: Int = 2,
+        height: Int = 2,
+    ): ByteArray {
+        require(values.size == width * height)
         val identification = ByteBuffer.allocate(21).order(ByteOrder.BIG_ENDIAN).apply {
             putInt(21)
             put(1.toByte())
@@ -68,9 +111,9 @@ class CwaGrib2WindParserTest {
                 "002625a00855d4a8000000000",
         ).also {
             ByteBuffer.wrap(it).order(ByteOrder.BIG_ENDIAN).apply {
-                putInt(6, 4)
-                putInt(30, 2)
-                putInt(34, 2)
+                putInt(6, values.size)
+                putInt(30, width)
+                putInt(34, height)
             }
         }
         val product = hex("0000002204000000000202020002000000010000000067000000000aff0000000000")
@@ -78,7 +121,7 @@ class CwaGrib2WindParserTest {
         val representation = ByteBuffer.allocate(21).order(ByteOrder.BIG_ENDIAN).apply {
             putInt(21)
             put(5.toByte())
-            putInt(4)
+            putInt(values.size)
             putShort(0)
             putFloat(0f)
             putShort(0)

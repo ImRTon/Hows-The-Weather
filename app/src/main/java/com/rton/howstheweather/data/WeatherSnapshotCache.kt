@@ -35,7 +35,7 @@ class WeatherSnapshotCache(
                 require(input.readInt() == VERSION) { "Weather cache version mismatch" }
                 readSnapshot(input).takeIf { snapshot ->
                     val age = Duration.between(snapshot.issuedAt, now)
-                    age >= MAX_FUTURE_SKEW.negated() && age <= maxAge && !snapshot.isDemo
+                    age >= MAX_FUTURE_SKEW.negated() && age <= maxAge
                 }
             }
         }.getOrElse {
@@ -45,7 +45,6 @@ class WeatherSnapshotCache(
     }
 
     suspend fun write(snapshot: WeatherSnapshot) = withContext(Dispatchers.IO) {
-        if (snapshot.isDemo) return@withContext
         directory.mkdirs()
         val temporary = File(directory, "$FILE_NAME.tmp")
         runCatching {
@@ -84,7 +83,6 @@ class WeatherSnapshotCache(
             output.writeFloat(it.directionDegrees)
             output.writeLong(it.observedAt.epochSecond)
         }
-        output.writeBoolean(snapshot.windsAreDemo)
         output.writeInt(snapshot.windProvenance.ordinal)
         output.writeLong(snapshot.issuedAt.epochSecond)
         output.writeBoolean(snapshot.hourlyAccumulationAtTarget != null)
@@ -114,7 +112,6 @@ class WeatherSnapshotCache(
                 observedAt = Instant.ofEpochSecond(input.readLong()),
             )
         }
-        val windsAreDemo = input.readBoolean()
         val windProvenance = WindProvenance.entries.getOrNull(input.readInt())
             ?: error("Unknown wind provenance")
         val issuedAt = Instant.ofEpochSecond(input.readLong())
@@ -131,10 +128,8 @@ class WeatherSnapshotCache(
             forecastAtTarget = points,
             windGrid = windGrid,
             winds = winds,
-            windsAreDemo = windsAreDemo,
             windProvenance = windProvenance,
             issuedAt = issuedAt,
-            isDemo = false,
             hourlyAccumulationAtTarget = hourlyAmount,
         )
     }
@@ -248,8 +243,9 @@ class WeatherSnapshotCache(
     private companion object {
         const val FILE_NAME = "last-known-good.bin.gz"
         const val MAGIC = 0x48545731 // HTW1
-        // Version 5 adds the 12-hour quantitative forecast series and a new unit ordinal.
-        const val VERSION = 5
+        // Version 9 removes synthetic-data provenance fields. Older caches are
+        // discarded so no previously cached demonstration wind can survive.
+        const val VERSION = 9
         // O-A0001-001 currently contains roughly 900 stations. Keep the bound
         // finite for corrupt-cache protection while allowing a complete
         // official observation set to survive process restarts.

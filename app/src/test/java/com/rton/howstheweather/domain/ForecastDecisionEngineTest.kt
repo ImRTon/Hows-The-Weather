@@ -52,6 +52,16 @@ class ForecastDecisionEngineTest {
         assertEquals("預報時間範圍：現在至 +60 分鐘", result.detail)
     }
 
+    @Test fun `invalid hourly sentinel uses requested fallback copy without becoming dry data`() {
+        val result = engine.evaluateHourlyAccumulation(-99f, issuedAt, issuedAt)
+
+        assertEquals(RainState.UNAVAILABLE, result.state)
+        assertEquals("應該不會下雨", result.headline)
+        assertEquals("未取得有效的未來一小時累積降雨資料", result.detail)
+        assertEquals(listOf(ForecastPoint(60, null)), result.series)
+        assertNull(result.eventWindow)
+    }
+
     @Test fun `stale hourly accumulation is explicitly labelled`() {
         val result = engine.evaluateHourlyAccumulation(6.4f, issuedAt, issuedAt.plusSeconds(31 * 60L))
 

@@ -13,6 +13,7 @@ import java.io.DataInputStream
 import java.time.OffsetDateTime
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.cos
+import kotlin.math.roundToInt
 
 data class CwaSatelliteImageMetadata(
     val bounds: GeoBounds,
@@ -47,12 +48,21 @@ class CwaSatelliteImageParser private constructor(
         argbPixels: IntArray,
         sourceId: String,
         maxGridDimension: Int = MAX_GRID_DIMENSION,
+        checkCancelled: () -> Unit = {},
     ): WeatherGrid {
         require(width > 1 && height > 1)
         require(argbPixels.size == width * height)
         require(maxGridDimension >= 2)
         if (sourceId.startsWith(TAIWAN_DATASET_ID)) {
-            return toDirectGrid(metadata, width, height, argbPixels, sourceId)
+            return toDirectGrid(
+                metadata,
+                width,
+                height,
+                argbPixels,
+                sourceId,
+                maxGridDimension,
+                checkCancelled,
+            )
         }
         require(sourceId.startsWith(EAST_ASIA_DATASET_ID)) { "不支援的衛星投影：$sourceId" }
         val scale = maxOf(width, height).toDouble() / maxGridDimension
@@ -63,6 +73,7 @@ class CwaSatelliteImageParser private constructor(
         val neighborhoodSamples = IntArray(25)
         val projectedPixels = projectionIndices(metadata, width, height, gridWidth, gridHeight)
         for (y in 0 until gridHeight) {
+            checkCancelled()
             for (x in 0 until gridWidth) {
                 val sourceIndex = projectedPixels[y * gridWidth + x]
                 if (sourceIndex < 0) continue
@@ -133,27 +144,37 @@ class CwaSatelliteImageParser private constructor(
         height: Int,
         argbPixels: IntArray,
         sourceId: String,
+        maxGridDimension: Int,
+        checkCancelled: () -> Unit,
     ): WeatherGrid {
-        val values = FloatArray(width * height)
+        val scale = maxOf(width, height).toDouble() / maxGridDimension
+        val gridWidth = if (scale <= 1.0) width else (width / scale).roundToInt().coerceAtLeast(2)
+        val gridHeight = if (scale <= 1.0) height else (height / scale).roundToInt().coerceAtLeast(2)
+        val values = FloatArray(gridWidth * gridHeight)
         val luminancePixels = IntArray(argbPixels.size) { luminance(argbPixels[it]) }
         val neighborhoodSamples = IntArray(25)
-        for (y in 0 until height) for (x in 0 until width) {
-            // The source includes thick white coordinate/coast lines. A lower neighborhood
-            // percentile removes narrow annotations while retaining broad cloud structures.
-            val luminance = lowerQuartileLuminance(
-                luminancePixels, width, height, x, y, neighborhoodSamples,
-            )
-            values[y * width + x] = luminance.takeIf { it >= MIN_VISIBLE_LUMINANCE } ?: 0f
+        for (y in 0 until gridHeight) {
+            checkCancelled()
+            val sourceY = (y.toDouble() / (gridHeight - 1) * (height - 1)).roundToInt()
+            for (x in 0 until gridWidth) {
+                val sourceX = (x.toDouble() / (gridWidth - 1) * (width - 1)).roundToInt()
+                // The source includes thick white coordinate/coast lines. A lower neighborhood
+                // percentile removes narrow annotations while retaining broad cloud structures.
+                val luminance = lowerQuartileLuminance(
+                    luminancePixels, width, height, sourceX, sourceY, neighborhoodSamples,
+                )
+                values[y * gridWidth + x] = luminance.takeIf { it >= MIN_VISIBLE_LUMINANCE } ?: 0f
+            }
         }
         val midLatitude = (metadata.bounds.south + metadata.bounds.north) / 2.0
         val resolutionKm = minOf(
-            (metadata.bounds.east - metadata.bounds.west) / (width - 1) * 111.0 *
+            (metadata.bounds.east - metadata.bounds.west) / (gridWidth - 1) * 111.0 *
                 cos(Math.toRadians(midLatitude)),
-            (metadata.bounds.north - metadata.bounds.south) / (height - 1) * 111.0,
+            (metadata.bounds.north - metadata.bounds.south) / (gridHeight - 1) * 111.0,
         )
         return WeatherGrid(
-            width = width,
-            height = height,
+            width = gridWidth,
+            height = gridHeight,
             values = values,
             unit = WeatherUnit.LUMINANCE,
             bounds = metadata.bounds,

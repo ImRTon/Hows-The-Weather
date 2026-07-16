@@ -3,6 +3,7 @@ package com.rton.howstheweather.data
 import com.rton.howstheweather.domain.GeoBounds
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.LambertConformalProjection
+import com.rton.howstheweather.domain.ProjectedPoint
 import com.rton.howstheweather.domain.WindGrid
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -24,6 +25,23 @@ data class DecodedWindComponent(
     val validAt: java.time.Instant,
 )
 
+internal data class GridWindow(
+    val xStart: Int,
+    val xEnd: Int,
+    val yStart: Int,
+    val yEnd: Int,
+) {
+    val width: Int get() = xEnd - xStart + 1
+    val height: Int get() = yEnd - yStart + 1
+
+    fun isFull(sourceWidth: Int, sourceHeight: Int): Boolean =
+        xStart == 0 && yStart == 0 && xEnd == sourceWidth - 1 && yEnd == sourceHeight - 1
+
+    companion object {
+        fun full(width: Int, height: Int) = GridWindow(0, width - 1, 0, height - 1)
+    }
+}
+
 data class LambertGridDefinition(
     val width: Int,
     val height: Int,
@@ -37,6 +55,51 @@ data class LambertGridDefinition(
     val firstStandardParallel: Double,
     val secondStandardParallel: Double,
 ) {
+    internal fun cropWindow(bounds: GeoBounds, marginCells: Int = 3): GridWindow? {
+        val projection = projection()
+        val first = projection.forward(GeoPoint(latitudeOfFirstPoint, longitudeOfFirstPoint))
+        val latitudes = listOf(bounds.south, (bounds.south + bounds.north) / 2.0, bounds.north)
+        val longitudes = listOf(bounds.west, (bounds.west + bounds.east) / 2.0, bounds.east)
+        val indices = latitudes.flatMap { latitude ->
+            longitudes.map { longitude ->
+                val projected = projection.forward(GeoPoint(latitude, longitude))
+                (projected.x - first.x) / spacingXMeters to
+                    (projected.y - first.y) / spacingYMeters
+            }
+        }
+        val xStart = (kotlin.math.floor(indices.minOf { it.first }).toInt() - marginCells).coerceAtLeast(0)
+        val xEnd = (kotlin.math.ceil(indices.maxOf { it.first }).toInt() + marginCells).coerceAtMost(width - 1)
+        val yStart = (kotlin.math.floor(indices.minOf { it.second }).toInt() - marginCells).coerceAtLeast(0)
+        val yEnd = (kotlin.math.ceil(indices.maxOf { it.second }).toInt() + marginCells).coerceAtMost(height - 1)
+        return if (xStart < xEnd && yStart < yEnd) GridWindow(xStart, xEnd, yStart, yEnd) else null
+    }
+
+    internal fun cropped(window: GridWindow): LambertGridDefinition {
+        if (window.isFull(width, height)) return this
+        val projection = projection()
+        val first = projection.forward(GeoPoint(latitudeOfFirstPoint, longitudeOfFirstPoint))
+        val croppedFirst = projection.inverse(
+            ProjectedPoint(
+                first.x + window.xStart * spacingXMeters,
+                first.y + window.yStart * spacingYMeters,
+            ),
+        )
+        return copy(
+            width = window.width,
+            height = window.height,
+            latitudeOfFirstPoint = croppedFirst.latitude,
+            longitudeOfFirstPoint = croppedFirst.longitude,
+        )
+    }
+
+    private fun projection() = LambertConformalProjection(
+        earthRadiusMeters,
+        latitudeOfOrigin,
+        centralLongitude,
+        firstStandardParallel,
+        secondStandardParallel,
+    )
+
     fun combine(
         east: FloatArray,
         north: FloatArray,
@@ -82,23 +145,33 @@ class CwaGrib2WindParser {
         return GribMessageDescriptor(length, product?.let { windComponent(prefix, it) })
     }
 
-    fun decode(message: ByteArray): DecodedWindComponent {
+    fun decode(
+        message: ByteArray,
+        cropBounds: GeoBounds? = null,
+        checkCancelled: () -> Unit = {},
+    ): DecodedWindComponent {
         val descriptor = describe(message)
         require(descriptor.length == message.size.toLong()) { "M-A0064 GRIB2 訊息未完整下載" }
         require(message.takeLast(4).toByteArray().contentEquals(END_MARKER)) { "M-A0064 GRIB2 結尾無效" }
         val sections = sections(message).associateBy(GribSection::number)
         val component = descriptor.component ?: error("M-A0064 訊息不是 10 m U/V 風場")
-        val definition = parseGrid(message, sections.getValue(3))
+        val fullDefinition = parseGrid(message, sections.getValue(3))
+        val cropWindow = cropBounds?.let {
+            fullDefinition.cropWindow(it) ?: error("M-A0064 風場不涵蓋指定範圍")
+        } ?: GridWindow.full(fullDefinition.width, fullDefinition.height)
         val values = parseValues(
             message,
             sections.getValue(5),
             sections.getValue(6),
             sections.getValue(7),
-            definition.width * definition.height,
+            fullDefinition.width * fullDefinition.height,
+            fullDefinition.width,
+            cropWindow,
+            checkCancelled,
         )
         return DecodedWindComponent(
             component = component,
-            definition = definition,
+            definition = fullDefinition.cropped(cropWindow),
             values = values,
             validAt = parseValidAt(message, sections.getValue(1), sections.getValue(4)),
         )
@@ -163,6 +236,9 @@ class CwaGrib2WindParser {
         bitmap: GribSection,
         data: GribSection,
         expectedCount: Int,
+        sourceWidth: Int,
+        cropWindow: GridWindow,
+        checkCancelled: () -> Unit,
     ): FloatArray {
         val representationStart = representation.start
         require(representation.length >= 21 && bytes.unsignedShort(representationStart + 9) == 0) {
@@ -183,10 +259,23 @@ class CwaGrib2WindParser {
         require(requiredBits <= (data.length - 5L) * 8L) { "M-A0064 packed data 長度不足" }
         val binaryMultiplier = 2.0.pow(binaryScale)
         val decimalMultiplier = 10.0.pow(-decimalScale)
-        return FloatArray(valueCount) { index ->
-            val packed = readBits(bytes, packedStart, index.toLong() * bitsPerValue, bitsPerValue)
-            ((reference + packed * binaryMultiplier) * decimalMultiplier).toFloat()
+        val values = FloatArray(cropWindow.width * cropWindow.height)
+        for (y in 0 until cropWindow.height) {
+            checkCancelled()
+            val sourceRow = (cropWindow.yStart + y) * sourceWidth
+            for (x in 0 until cropWindow.width) {
+                val sourceIndex = sourceRow + cropWindow.xStart + x
+                val packed = readBits(
+                    bytes,
+                    packedStart,
+                    sourceIndex.toLong() * bitsPerValue,
+                    bitsPerValue,
+                )
+                values[y * cropWindow.width + x] =
+                    ((reference + packed * binaryMultiplier) * decimalMultiplier).toFloat()
+            }
         }
+        return values
     }
 
     private fun parseValidAt(bytes: ByteArray, identification: GribSection, product: GribSection): java.time.Instant {

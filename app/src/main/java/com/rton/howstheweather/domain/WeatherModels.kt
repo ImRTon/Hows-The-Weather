@@ -133,7 +133,6 @@ data class AreaForecast(
     val districtName: String,
     val periods: List<AreaForecastPeriod>,
     val sourceId: String,
-    val isDemo: Boolean = false,
 ) {
     val displayName: String
         get() = if (districtName.startsWith(countyName)) districtName else countyName + districtName
@@ -146,6 +145,23 @@ data class AirQualityObservation(
     val status: String,
     val primaryPollutant: String?,
     val observedAt: Instant,
+)
+
+data class CurrentWeatherObservation(
+    val stationName: String,
+    val coordinate: GeoPoint,
+    val weatherDescription: String?,
+    val temperatureCelsius: Float?,
+    val relativeHumidityPercent: Float?,
+    val windSpeedMetersPerSecond: Float?,
+    val windDirectionDegrees: Float?,
+    val windDirectionVariable: Boolean = false,
+    val precipitationTodayMillimeters: Float?,
+    val precipitationTrace: Boolean = false,
+    val airPressureHectopascals: Float?,
+    val uvIndex: Int?,
+    val observedAt: Instant,
+    val sourceId: String,
 )
 
 data class ForecastDecision(
@@ -175,6 +191,9 @@ data class LayerSelection(
 data class HomeUiState(
     val target: TargetLocation,
     val decision: ForecastDecision,
+    val currentWeather: CurrentWeatherObservation? = null,
+    val currentWeatherLoading: Boolean = false,
+    val currentWeatherUnavailableReason: String? = null,
     val areaForecast: AreaForecast? = null,
     val areaForecastLoading: Boolean = false,
     val weeklyForecast: AreaForecast? = null,
@@ -197,11 +216,10 @@ data class HomeUiState(
     val mapZoom: Float = DEFAULT_MAP_ZOOM,
     val cloudCoverage: CloudCoverage = CloudCoverage.EAST_ASIA,
     val radarCoverage: RadarCoverage = RadarCoverage.WIDE,
+    val radarRegionalLoading: Boolean = false,
     val windGrid: WindGrid? = null,
     val winds: List<WindObservation> = emptyList(),
-    val windsAreDemo: Boolean = false,
     val windProvenance: WindProvenance = WindProvenance.UNAVAILABLE,
     val isUpdating: Boolean = false,
-    val reminderScheduled: Boolean = false,
     val message: String? = null,
 )

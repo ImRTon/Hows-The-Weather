@@ -16,8 +16,9 @@ data class CwaQuantitativeForecastMetadata(
  * Converts the public F-C0035-015…018 chart into a regular numerical grid.
  *
  * Only exact colors from CWA's finite rainfall legend are accepted. Titles,
- * coastlines, the logo, legend labels and the pale chart background therefore
- * become zero before the app renders the values with its own accessible palette.
+ * coastlines, the logo and legend labels therefore cannot become rainfall;
+ * a missing chart pixel is filled only by the bounded mean of adjacent valid
+ * legend pixels before the app renders its own accessible palette.
  * The affine transform is calibrated to the main Taiwan panel; decorative
  * relocated inset maps are intentionally outside the output domain.
  */
@@ -45,15 +46,15 @@ class CwaQuantitativeForecastImageParser {
         require(endHour in 12..48 && endHour % 12 == 0)
         val values = FloatArray(OUTPUT_WIDTH * OUTPUT_HEIGHT)
         for (y in 0 until OUTPUT_HEIGHT) {
-            val latitude = OUTPUT_BOUNDS.north -
-                y.toDouble() / (OUTPUT_HEIGHT - 1) * (OUTPUT_BOUNDS.north - OUTPUT_BOUNDS.south)
+            val latitude = SOURCE_BOUNDS.north -
+                y.toDouble() / (OUTPUT_HEIGHT - 1) * (SOURCE_BOUNDS.north - SOURCE_BOUNDS.south)
             for (x in 0 until OUTPUT_WIDTH) {
-                val longitude = OUTPUT_BOUNDS.west +
-                    x.toDouble() / (OUTPUT_WIDTH - 1) * (OUTPUT_BOUNDS.east - OUTPUT_BOUNDS.west)
+                val longitude = SOURCE_BOUNDS.west +
+                    x.toDouble() / (OUTPUT_WIDTH - 1) * (SOURCE_BOUNDS.east - SOURCE_BOUNDS.west)
                 val (referenceX, referenceY) = sourcePixel(longitude, latitude)
                 val sourceX = referenceX * imageWidth / REFERENCE_IMAGE_WIDTH
                 val sourceY = referenceY * imageHeight / REFERENCE_IMAGE_HEIGHT
-                values[y * OUTPUT_WIDTH + x] = decodeNeighborhood(
+                values[y * OUTPUT_WIDTH + x] = decodeSample(
                     sourceX.roundToInt(), sourceY.roundToInt(), imageWidth, imageHeight, argbPixels,
                 )
             }
@@ -63,7 +64,7 @@ class CwaQuantitativeForecastImageParser {
             height = OUTPUT_HEIGHT,
             values = values,
             unit = WeatherUnit.MILLIMETERS_TWELVE_HOURS,
-            bounds = OUTPUT_BOUNDS,
+            bounds = DISPLAY_BOUNDS,
             resolutionKm = OFFICIAL_GRID_RESOLUTION_KM,
             // The chart metadata exposes publication time; the selected 12-hour
             // interval is carried by list position rather than pretending this is
@@ -78,23 +79,29 @@ class CwaQuantitativeForecastImageParser {
         return RAIN_PALETTE[argb and 0x00ffffff]
     }
 
-    private fun decodeNeighborhood(
+    internal fun decodeSample(
         centerX: Int,
         centerY: Int,
         width: Int,
         height: Int,
         pixels: IntArray,
     ): Float {
-        var strongest: Float? = null
+        if (centerX in 0 until width && centerY in 0 until height) {
+            decodeRain(pixels[centerY * width + centerX])?.let { return it }
+        }
+        var total = 0f
+        var count = 0
         for (dy in -1..1) for (dx in -1..1) {
+            if (dx == 0 && dy == 0) continue
             val x = centerX + dx
             val y = centerY + dy
             if (x !in 0 until width || y !in 0 until height) continue
             decodeRain(pixels[y * width + x])?.let { value ->
-                if (strongest == null || value > strongest) strongest = value
+                total += value
+                count += 1
             }
         }
-        return strongest ?: 0f
+        return if (count == 0) 0f else total / count
     }
 
     internal fun sourcePixel(longitude: Double, latitude: Double): Pair<Double, Double> {
@@ -132,7 +139,12 @@ class CwaQuantitativeForecastImageParser {
         const val REFERENCE_IMAGE_HEIGHT = 1500.0
         const val MIN_ALPHA = 240
         const val OFFICIAL_GRID_RESOLUTION_KM = 2.5
-        val OUTPUT_BOUNDS = GeoBounds(south = 21.7, west = 119.2, north = 25.5, east = 122.2)
+        const val DISPLAY_LATITUDE_NUDGE_DEGREES = 0.02
+        val SOURCE_BOUNDS = GeoBounds(south = 21.7, west = 119.2, north = 25.5, east = 122.2)
+        val DISPLAY_BOUNDS = SOURCE_BOUNDS.copy(
+            south = SOURCE_BOUNDS.south + DISPLAY_LATITUDE_NUDGE_DEGREES,
+            north = SOURCE_BOUNDS.north + DISPLAY_LATITUDE_NUDGE_DEGREES,
+        )
 
         // Pixel-to-WGS84 affine calibration for the 1245 × 1500 F-C0035 chart.
         // Coordinates scale with the chart dimensions before this inverse is used.

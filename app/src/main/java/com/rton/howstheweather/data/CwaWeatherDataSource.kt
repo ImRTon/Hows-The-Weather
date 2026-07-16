@@ -3,34 +3,48 @@ package com.rton.howstheweather.data
 import android.graphics.BitmapFactory
 import com.rton.howstheweather.domain.ForecastPoint
 import com.rton.howstheweather.domain.AreaForecast
+import com.rton.howstheweather.domain.CurrentWeatherObservation
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.WeatherGrid
 import com.rton.howstheweather.domain.WeatherUnit
 import com.rton.howstheweather.domain.WindGrid
 import com.rton.howstheweather.domain.WindObservation
 import com.rton.howstheweather.domain.WindProvenance
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class CwaWeatherDataSource(
     private val apiKey: String,
-    private val client: OkHttpClient = OkHttpClient(),
+    private val client: OkHttpClient = defaultClient(),
     private val parser: CwaJsonGridParser = CwaJsonGridParser(),
     private val radarImageParser: CwaRadarImageParser = CwaRadarImageParser(),
     private val quantitativeForecastParser: CwaQuantitativeForecastImageParser = CwaQuantitativeForecastImageParser(),
@@ -39,39 +53,73 @@ class CwaWeatherDataSource(
     private val animationFrameParser: CwaAnimationFrameParser = CwaAnimationFrameParser(),
     private val cloudGridHarmonizer: CloudGridHarmonizer = CloudGridHarmonizer(),
     private val windParser: CwaWindObservationParser = CwaWindObservationParser(),
+    private val currentWeatherParser: CwaCurrentWeatherParser = CwaCurrentWeatherParser(),
     private val gribWindParser: CwaGrib2WindParser = CwaGrib2WindParser(),
     private val areaForecastParser: CwaAreaForecastParser = CwaAreaForecastParser(),
-    private val supplementaryDemoSource: SupplementaryWeatherDataSource = DemoWeatherDataSource(),
 ) : WeatherDataSource {
+    private val historyLoadSemaphore = Semaphore(HISTORY_DOWNLOAD_CONCURRENCY)
+    private val quantitativeLoadSemaphore = Semaphore(QUANTITATIVE_DOWNLOAD_CONCURRENCY)
+    private val animationCacheMutex = Mutex()
+
     init { require(apiKey.isNotBlank()) }
 
-    override suspend fun load(target: GeoPoint): WeatherSnapshot = coroutineScope {
-        val wideRadarRequest = async {
-            fetchRadarFrame(WIDE_RADAR_DATASET_ID, RADAR_WIDE_SAMPLE_SIZE)
-        }
-        val localRadarRequest = async {
-            fetchRadarFrame(LOCAL_RADAR_DATASET_ID, RADAR_LOCAL_SAMPLE_SIZE)
-        }
-        val forecastRequest = async { fetchGrid("F-B0046-001", WeatherUnit.MILLIMETERS_ONE_HOUR) }
-        val radar = wideRadarRequest.await()
-        val radarRegional = localRadarRequest.await()
-        val forecast = forecastRequest.await()
-        val hourlyAmount = forecast.sample(target)
-        WeatherSnapshot(
+    override suspend fun load(target: GeoPoint): WeatherSnapshot {
+        val radar = fetchRadarFrame(WIDE_RADAR_DATASET_ID, RADAR_WIDE_SAMPLE_SIZE)
+        return WeatherSnapshot(
             radar = radar,
-            radarRegional = radarRegional,
-            rainForecast = listOf(forecast),
+            radarRegional = null,
+            rainForecast = emptyList(),
             cloudFrames = emptyList(),
             cloudRegionalFrames = emptyList(),
-            forecastAtTarget = listOf(ForecastPoint(60, hourlyAmount)),
+            forecastAtTarget = emptyList(),
             winds = emptyList(),
-            windsAreDemo = false,
             windProvenance = WindProvenance.UNAVAILABLE,
+            issuedAt = radar.validAt,
+        )
+    }
+
+    override suspend fun loadCurrentWeather(target: GeoPoint): CurrentWeatherObservation? {
+        val nearbyStationIds = CwaObservationStationIndex
+            .nearest(target, CURRENT_WEATHER_CANDIDATE_COUNT)
+            .map(CwaObservationStation::id)
+        if (nearbyStationIds.isEmpty()) return null
+        val url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/$CURRENT_WEATHER_DATASET_ID".toHttpUrl()
+            .newBuilder()
+            .addQueryParameter("Authorization", apiKey)
+            .addQueryParameter("format", "JSON")
+            .addQueryParameter("StationId", nearbyStationIds.joinToString(","))
+            .addQueryParameter("WeatherElement", CURRENT_WEATHER_ELEMENTS)
+            .addQueryParameter("GeoInfo", "Coordinates")
+            .build()
+
+        // Enqueue this small, user-visible request before dispatching the body
+        // decode so radar, cloud, and area products cannot take its queue slot.
+        val body = request(url.toString())
+        val observations = try {
+            withContext(Dispatchers.IO) { currentWeatherParser.parse(body.string()) }
+        } finally {
+            body.close()
+        }
+        return observations
+            .minByOrNull { areaForecastParser.distanceKm(target, it.coordinate) }
+            ?.takeIf {
+                areaForecastParser.distanceKm(target, it.coordinate) <= MAX_CURRENT_WEATHER_DISTANCE_KM
+            }
+    }
+
+    override suspend fun loadDecisionForecast(target: GeoPoint): WeatherDecisionForecast {
+        val forecast = fetchGrid("F-B0046-001", WeatherUnit.MILLIMETERS_ONE_HOUR)
+        val hourlyAmount = forecast.sample(target)
+        return WeatherDecisionForecast(
+            grids = listOf(forecast),
+            forecastAtTarget = listOf(ForecastPoint(60, hourlyAmount)),
             issuedAt = forecast.validAt,
-            isDemo = false,
             hourlyAccumulationAtTarget = hourlyAmount,
         )
     }
+
+    override suspend fun loadRegionalRadar(): WeatherGrid =
+        fetchRadarFrame(LOCAL_RADAR_DATASET_ID, RADAR_LOCAL_SAMPLE_SIZE)
 
     override suspend fun loadAreaForecast(target: GeoPoint): AreaForecast? = coroutineScope {
         val counties = countyForecastLocations ?: withContext(Dispatchers.IO) {
@@ -88,7 +136,7 @@ class CwaWeatherDataSource(
 
         candidates.map { (county, datasetId) ->
             async(Dispatchers.IO) {
-                runCatching {
+                catchingCancellable {
                     areaForecastParser.nearestForecast(
                         json = fetchForecastJson(datasetId),
                         target = target,
@@ -119,7 +167,7 @@ class CwaWeatherDataSource(
 
         candidates.map { (county, datasetId) ->
             async(Dispatchers.IO) {
-                runCatching {
+                catchingCancellable {
                     areaForecastParser.nearestWeeklyForecast(
                         json = fetchForecastJson(datasetId),
                         target = target,
@@ -136,13 +184,6 @@ class CwaWeatherDataSource(
     override fun enrichmentUpdates(snapshot: WeatherSnapshot, target: GeoPoint): Flow<WeatherSnapshot> = channelFlow {
         val stateMutex = Mutex()
         var latest = snapshot
-        val demoMutex = Mutex()
-        var demo: WeatherSupplements? = null
-        val taiwanCloudReady = CompletableDeferred<Unit>()
-
-        suspend fun demoSupplements(): WeatherSupplements = demoMutex.withLock {
-            demo ?: supplementaryDemoSource.loadSupplements().also { demo = it }
-        }
 
         suspend fun publish(transform: (WeatherSnapshot) -> WeatherSnapshot) {
             val update = stateMutex.withLock {
@@ -152,7 +193,7 @@ class CwaWeatherDataSource(
         }
 
         launch {
-            val result = runCatching { fetchQuantitativeForecastFrames() }
+            val result = catchingCancellable { fetchQuantitativeForecastFrames() }
             publish { current ->
                 current.copy(
                     quantitativeForecastFrames = result.getOrElse { current.quantitativeForecastFrames },
@@ -166,177 +207,227 @@ class CwaWeatherDataSource(
         }
 
         launch {
-            taiwanCloudReady.await()
-            val areaForecast = runCatching { loadAreaForecast(target) }.getOrNull()
-            publish { current -> current.copy(areaForecast = areaForecast) }
-        }
-
-        launch {
-            taiwanCloudReady.await()
-            val wideRequest = async {
-                runCatching {
-                    fetchRadarHistory(
-                        snapshot.radar, WIDE_RADAR_DATASET_ID, WIDE_RADAR_FILE_PREFIX, RADAR_WIDE_SAMPLE_SIZE,
-                    )
-                }
-            }
-            val localRequest = async {
-                snapshot.radarRegional?.let { regional ->
-                    runCatching {
-                        fetchRadarHistory(
-                            regional, LOCAL_RADAR_DATASET_ID, LOCAL_RADAR_FILE_PREFIX, RADAR_LOCAL_SAMPLE_SIZE,
-                        )
-                    }
-                } ?: Result.success(emptyList())
-            }
-            val wideResult = wideRequest.await()
-            val localResult = localRequest.await()
-            publish { current ->
-                current.copy(
-                    radarFrames = wideResult.getOrElse { current.radarFrames },
-                    radarRegionalFrames = localResult.getOrElse { current.radarRegionalFrames },
-                    notice = current.notice.appendFailures(
-                        wideResult.exceptionOrNull()?.let { "廣域雷達歷史失敗：${it.message ?: "未知錯誤"}" },
-                        localResult.exceptionOrNull()?.let { "台灣雷達歷史失敗：${it.message ?: "未知錯誤"}" },
-                    ),
-                )
-            }
-        }
-
-        launch {
-            val taiwanResult = runCatching {
+            val taiwanResult = catchingCancellable {
                 fetchSatelliteFrame(TAIWAN_CLOUD_DATASET_ID, CLOUD_LOCAL_MAX_DIMENSION)
             }
-            val taiwanFallback = if (taiwanResult.isFailure) demoSupplements().cloudRegionalFrames else emptyList()
-            val taiwanCurrent = taiwanResult.getOrNull()?.let(::listOf) ?: taiwanFallback
+            val taiwanCurrent = taiwanResult.getOrNull()?.let(::listOf)
+                ?: snapshot.cloudRegionalFrames
             publish { current ->
                 current.copy(
-                    cloudRegionalFrames = taiwanCurrent,
+                    cloudRegionalFrames = taiwanResult.getOrNull()?.let(::listOf)
+                        ?: current.cloudRegionalFrames,
                     notice = current.notice.appendFailures(
                         taiwanResult.exceptionOrNull()?.let {
-                            "台灣衛星雲圖失敗：${it.message ?: "未知錯誤"} · 改用示範雲層"
+                            val fallbackState = if (current.cloudRegionalFrames.isNotEmpty()) {
+                                "保留上次官方資料"
+                            } else {
+                                "此圖層暫不可用"
+                            }
+                            "台灣衛星雲圖失敗：${it.message ?: "未知錯誤"} · $fallbackState"
                         },
                     ),
                 )
             }
-            taiwanCloudReady.complete(Unit)
 
-            // Once the current Taiwan frame is visible, prioritize the current East Asia
-            // frame while Taiwan history downloads in parallel. Historical playback can
-            // arrive later without delaying either current observation.
-            val eastAsiaRequest = async {
-                runCatching {
-                    fetchSatelliteFrame(EAST_ASIA_CLOUD_DATASET_ID, CLOUD_EAST_ASIA_MAX_DIMENSION)
-                }
+            val eastAsiaResult = catchingCancellable {
+                fetchSatelliteFrame(EAST_ASIA_CLOUD_DATASET_ID, CLOUD_EAST_ASIA_MAX_DIMENSION)
             }
-            val taiwanHistoryRequest = async {
-                if (taiwanResult.isSuccess) {
-                    runCatching {
-                        fetchSatelliteHistory(
-                            taiwanResult.getOrThrow(), TAIWAN_CLOUD_DATASET_ID, TAIWAN_CLOUD_FILE_PREFIX,
-                            CLOUD_LOCAL_MAX_DIMENSION,
-                        )
-                    }
-                } else {
-                    Result.success(taiwanFallback)
-                }
-            }
-
-            val eastAsiaResult = eastAsiaRequest.await()
-            val eastAsiaFallback = if (eastAsiaResult.isFailure) demoSupplements().cloudFrames else emptyList()
-            val eastAsiaCurrent = eastAsiaResult.getOrNull()?.let(::listOf) ?: eastAsiaFallback
+            val eastAsiaCurrent = eastAsiaResult.getOrNull()?.let(::listOf)
+                ?: snapshot.cloudFrames
             publish { current ->
                 current.copy(
-                    cloudFrames = eastAsiaCurrent,
+                    cloudFrames = eastAsiaResult.getOrNull()?.let(::listOf)
+                        ?: current.cloudFrames,
                     notice = current.notice.appendFailures(
                         eastAsiaResult.exceptionOrNull()?.let {
-                            "東亞衛星雲圖失敗：${it.message ?: "未知錯誤"} · 改用示範雲層"
+                            val fallbackState = if (current.cloudFrames.isNotEmpty()) {
+                                "保留上次官方資料"
+                            } else {
+                                "此圖層暫不可用"
+                            }
+                            "東亞衛星雲圖失敗：${it.message ?: "未知錯誤"} · $fallbackState"
                         },
                     ),
                 )
             }
 
-            val taiwanHistoryResult = taiwanHistoryRequest.await()
-            val taiwanHistory = taiwanHistoryResult.getOrElse { taiwanCurrent }
-            publish { current ->
-                current.copy(
-                    cloudRegionalFrames = taiwanHistory,
-                    notice = current.notice.appendFailures(
-                        taiwanHistoryResult.exceptionOrNull()?.let {
-                            "台灣衛星歷史失敗：${it.message ?: "未知錯誤"}"
-                        },
-                    ),
-                )
-            }
-
-            if (eastAsiaResult.isSuccess) {
+            if (taiwanCurrent.isNotEmpty() && eastAsiaCurrent.isNotEmpty()) {
                 val harmonizedTaiwan = withContext(PREPROCESSING_DISPATCHER) {
-                    cloudGridHarmonizer.harmonize(taiwanHistory, eastAsiaCurrent)
+                    cloudGridHarmonizer.harmonize(taiwanCurrent, eastAsiaCurrent)
                 }
                 publish { current ->
                     current.copy(cloudRegionalFrames = harmonizedTaiwan)
                 }
-                val eastAsiaHistoryResult = runCatching {
-                    fetchSatelliteHistory(
-                        eastAsiaResult.getOrThrow(), EAST_ASIA_CLOUD_DATASET_ID, EAST_ASIA_CLOUD_FILE_PREFIX,
-                        CLOUD_EAST_ASIA_MAX_DIMENSION,
+            }
+        }
+    }
+
+    override suspend fun loadWind(): WeatherWindData = windUpdates().last()
+
+    override fun windUpdates(): Flow<WeatherWindData> = channelFlow {
+        val completions = Channel<WindLoadResult>(capacity = 2)
+        launch {
+            completions.send(
+                WindLoadResult.Observations(catchingCancellable { fetchWindObservations() }),
+            )
+        }
+        launch {
+            completions.send(
+                WindLoadResult.Model(catchingCancellable { fetchModelWindGrid() }),
+            )
+        }
+        var observationError: Throwable? = null
+        var modelError: Throwable? = null
+        var modelWasPublished = false
+        repeat(2) {
+            when (val completed = completions.receive()) {
+                is WindLoadResult.Observations -> completed.result.fold(
+                    onSuccess = { observations ->
+                        if (!modelWasPublished) {
+                            send(
+                                WeatherWindData(
+                                    winds = observations,
+                                    provenance = WindProvenance.OBSERVATION,
+                                ),
+                            )
+                        }
+                    },
+                    onFailure = { observationError = it },
+                )
+                is WindLoadResult.Model -> completed.result.fold(
+                    onSuccess = { model ->
+                        modelWasPublished = true
+                        send(
+                            WeatherWindData(
+                                windGrid = model,
+                                provenance = WindProvenance.MODEL,
+                            ),
+                        )
+                    },
+                    onFailure = { modelError = it },
+                )
+            }
+        }
+        completions.close()
+        val finalObservationError = observationError
+        val finalModelError = modelError
+        if (finalObservationError != null && finalModelError != null) {
+            finalModelError.addSuppressed(finalObservationError)
+            throw IllegalStateException(
+                "CWA 風場載入失敗：模式與測站資料皆不可用",
+                finalModelError,
+            )
+        }
+    }
+
+    override fun historyUpdates(snapshot: WeatherSnapshot, kind: WeatherHistoryKind): Flow<WeatherSnapshot> =
+        channelFlow {
+            when (kind) {
+                WeatherHistoryKind.RADAR -> {
+                    val wideRequest = async {
+                        catchingCancellable {
+                            fetchRadarHistory(
+                                snapshot.radar,
+                                WIDE_RADAR_DATASET_ID,
+                                WIDE_RADAR_FILE_PREFIX,
+                                RADAR_WIDE_SAMPLE_SIZE,
+                            )
+                        }
+                    }
+                    val localRequest = async {
+                        snapshot.radarRegional?.let { regional ->
+                            catchingCancellable {
+                                fetchRadarHistory(
+                                    regional,
+                                    LOCAL_RADAR_DATASET_ID,
+                                    LOCAL_RADAR_FILE_PREFIX,
+                                    RADAR_LOCAL_SAMPLE_SIZE,
+                                )
+                            }
+                        } ?: Result.success(emptyList())
+                    }
+                    val wideResult = wideRequest.await()
+                    val localResult = localRequest.await()
+                    send(
+                        snapshot.copy(
+                            radarFrames = wideResult.getOrElse { snapshot.radarFrames },
+                            radarRegionalFrames = localResult.getOrElse { snapshot.radarRegionalFrames },
+                            notice = snapshot.notice.appendFailures(
+                                wideResult.exceptionOrNull()?.let {
+                                    "廣域雷達歷史失敗：${it.message ?: "未知錯誤"}"
+                                },
+                                localResult.exceptionOrNull()?.let {
+                                    "台灣雷達歷史失敗：${it.message ?: "未知錯誤"}"
+                                },
+                            ),
+                        ),
                     )
                 }
-                publish { current ->
-                    current.copy(
-                        cloudFrames = eastAsiaHistoryResult.getOrElse { eastAsiaCurrent },
-                        notice = current.notice.appendFailures(
-                            eastAsiaHistoryResult.exceptionOrNull()?.let {
-                                "東亞衛星歷史失敗：${it.message ?: "未知錯誤"}"
-                            },
+
+                WeatherHistoryKind.CLOUD -> {
+                    val taiwanCurrent = snapshot.cloudRegionalFrames.maxByOrNull(WeatherGrid::validAt)
+                    val eastAsiaCurrent = snapshot.cloudFrames.maxByOrNull(WeatherGrid::validAt)
+                    if (taiwanCurrent == null && eastAsiaCurrent == null) {
+                        send(snapshot)
+                        return@channelFlow
+                    }
+                    val taiwanRequest = async {
+                        taiwanCurrent?.let {
+                            catchingCancellable {
+                                fetchSatelliteHistory(
+                                    it,
+                                    TAIWAN_CLOUD_DATASET_ID,
+                                    TAIWAN_CLOUD_FILE_PREFIX,
+                                    CLOUD_LOCAL_MAX_DIMENSION,
+                                )
+                            }
+                        }
+                    }
+                    val eastAsiaRequest = async {
+                        eastAsiaCurrent?.let {
+                            catchingCancellable {
+                                fetchSatelliteHistory(
+                                    it,
+                                    EAST_ASIA_CLOUD_DATASET_ID,
+                                    EAST_ASIA_CLOUD_FILE_PREFIX,
+                                    CLOUD_EAST_ASIA_MAX_DIMENSION,
+                                )
+                            }
+                        }
+                    }
+                    val taiwanResult = taiwanRequest.await()
+                    val eastAsiaResult = eastAsiaRequest.await()
+                    val eastAsiaFrames = eastAsiaResult?.getOrElse { snapshot.cloudFrames }
+                        ?: snapshot.cloudFrames
+                    val taiwanFrames = taiwanResult?.getOrElse { snapshot.cloudRegionalFrames }
+                        ?: snapshot.cloudRegionalFrames
+                    val harmonizedTaiwan = if (taiwanFrames.isNotEmpty() && eastAsiaFrames.isNotEmpty()) {
+                        withContext(PREPROCESSING_DISPATCHER) {
+                            cloudGridHarmonizer.harmonize(taiwanFrames, eastAsiaFrames)
+                        }
+                    } else {
+                        taiwanFrames
+                    }
+                    send(
+                        snapshot.copy(
+                            cloudFrames = eastAsiaFrames,
+                            cloudRegionalFrames = harmonizedTaiwan,
+                            notice = snapshot.notice.appendFailures(
+                                taiwanResult?.exceptionOrNull()?.let {
+                                    "台灣衛星歷史失敗：${it.message ?: "未知錯誤"}"
+                                },
+                                eastAsiaResult?.exceptionOrNull()?.let {
+                                    "東亞衛星歷史失敗：${it.message ?: "未知錯誤"}"
+                                },
+                            ),
                         ),
                     )
                 }
             }
         }
 
-        launch {
-            taiwanCloudReady.await()
-            val modelResult = runCatching { fetchModelWindGrid() }
-            val observationResult = if (modelResult.isFailure) {
-                runCatching { fetchWindObservations() }
-            } else {
-                Result.success(emptyList())
-            }
-            val useDemoWind = modelResult.isFailure && observationResult.isFailure
-            val fallbackWinds = if (useDemoWind) demoSupplements().winds else emptyList()
-            val modelFailure = modelResult.exceptionOrNull()?.let { modelError ->
-                if (observationResult.isSuccess) {
-                    "WRF 3 km 風場失敗：${modelError.message ?: "未知錯誤"} · 改用 CWA 測站觀測"
-                } else {
-                    "WRF 3 km 風場失敗：${modelError.message ?: "未知錯誤"}"
-                }
-            }
-            val observationFailure = observationResult.exceptionOrNull()?.let { observationError ->
-                "測站風場失敗：${observationError.message ?: "未知錯誤"} · 改用示範測站"
-            }
-            publish { current ->
-                current.copy(
-                    windGrid = modelResult.getOrNull(),
-                    winds = when {
-                        modelResult.isSuccess -> emptyList()
-                        observationResult.isSuccess -> observationResult.getOrThrow()
-                        else -> fallbackWinds
-                    },
-                    windsAreDemo = useDemoWind,
-                    windProvenance = when {
-                        modelResult.isSuccess -> WindProvenance.MODEL
-                        observationResult.isSuccess -> WindProvenance.OBSERVATION
-                        else -> WindProvenance.DEMO
-                    },
-                    notice = current.notice.appendFailures(modelFailure, observationFailure),
-                )
-            }
-        }
-    }
-
     private suspend fun fetchModelWindGrid(): WindGrid = withContext(Dispatchers.IO) {
-        val response = client.newCall(Request.Builder().url(MODEL_WIND_URL).head().build()).execute()
+        val response = execute(Request.Builder().url(MODEL_WIND_URL).head().build())
         val contentLength = response.use {
             check(it.isSuccessful) { "CWA M-A0064 回應 ${it.code}" }
             it.header("Content-Length")?.toLongOrNull()
@@ -345,12 +436,25 @@ class CwaWeatherDataSource(
         }
         suspend fun decodeRanges(ranges: ModelWindRanges): WindGrid = coroutineScope {
             check(ranges.east.last < contentLength && ranges.north.last < contentLength)
-            val eastRequest = async { gribWindParser.decode(fetchRange(ranges.east)) }
-            val northRequest = async { gribWindParser.decode(fetchRange(ranges.north)) }
+            val eastBytesRequest = async { fetchRange(ranges.east) }
+            val northBytesRequest = async { fetchRange(ranges.north) }
+            val eastBytes = eastBytesRequest.await()
+            val northBytes = northBytesRequest.await()
+            val processingContext = currentCoroutineContext()
+            val eastRequest = async(PREPROCESSING_DISPATCHER) {
+                gribWindParser.decode(eastBytes, WIND_DECODE_BOUNDS) {
+                    processingContext.ensureActive()
+                }
+            }
+            val northRequest = async(PREPROCESSING_DISPATCHER) {
+                gribWindParser.decode(northBytes, WIND_DECODE_BOUNDS) {
+                    processingContext.ensureActive()
+                }
+            }
             gribWindParser.combine(eastRequest.await(), northRequest.await())
         }
         val preferredRanges = cachedModelWindRanges ?: STABLE_MODEL_WIND_RANGES
-        runCatching { decodeRanges(preferredRanges) }.getOrNull()?.let { return@withContext it }
+        catchingCancellable { decodeRanges(preferredRanges) }.getOrNull()?.let { return@withContext it }
 
         var offset = 0L
         var eastRange: LongRange? = null
@@ -379,12 +483,12 @@ class CwaWeatherDataSource(
         decodeRanges(discoveredRanges).also { cachedModelWindRanges = discoveredRanges }
     }
 
-    private fun fetchRange(range: LongRange): ByteArray {
+    private suspend fun fetchRange(range: LongRange): ByteArray {
         val request = Request.Builder()
             .url(MODEL_WIND_URL)
             .header("Range", "bytes=${range.first}-${range.last}")
             .build()
-        return client.newCall(request).execute().use { response ->
+        return execute(request).use { response ->
             check(response.code == 206) { "CWA M-A0064 不支援分段下載（${response.code}）" }
             response.body.bytes().also { bytes ->
                 check(bytes.size.toLong() == range.last - range.first + 1L) { "CWA M-A0064 分段下載不完整" }
@@ -425,12 +529,13 @@ class CwaWeatherDataSource(
         }
         records.map { record ->
             async {
-                runCatching {
-                    val metadata = withContext(Dispatchers.IO) {
-                        radarMetadataForHistory(record, currentMetadata)
+                historyLoadSemaphore.withPermit {
+                    catchingCancellable {
+                        val metadata = radarMetadataForHistory(record, currentMetadata)
+                        decodeRadarImage(metadata, datasetId, sampleSize)
                     }
-                    decodeRadarImage(metadata, datasetId, sampleSize)
-                }.getOrNull()
+                        .getOrNull()
+                }
             }
         }.awaitAll().filterNotNull()
             .filter(WeatherGrid::isObservedFrame)
@@ -459,21 +564,22 @@ class CwaWeatherDataSource(
         val currentMetadata = CwaSatelliteImageMetadata(current.bounds, current.validAt, productUrl = "")
         val records = withContext(Dispatchers.IO) {
             fetchAnimationRecords(
-            listUrl = SATELLITE_ANIMATION_LIST_URL,
-            filePrefix = animationFilePrefix,
-            baseUrl = SATELLITE_ANIMATION_BASE_URL,
-            datasetId = datasetId,
-            currentAt = currentMetadata.observedAt,
-        )
+                listUrl = SATELLITE_ANIMATION_LIST_URL,
+                filePrefix = animationFilePrefix,
+                baseUrl = SATELLITE_ANIMATION_BASE_URL,
+                datasetId = datasetId,
+                currentAt = currentMetadata.observedAt,
+            )
         }
         val historical = records.map { record ->
             async {
-                runCatching {
-                    val metadata = withContext(Dispatchers.IO) {
-                        satelliteMetadataForHistory(record, currentMetadata)
+                historyLoadSemaphore.withPermit {
+                    catchingCancellable {
+                        val metadata = satelliteMetadataForHistory(record, currentMetadata)
+                        decodeSatelliteImage(metadata, datasetId, maxGridDimension)
                     }
-                    decodeSatelliteImage(metadata, datasetId, maxGridDimension)
-                }.getOrNull()
+                        .getOrNull()
+                }
             }
         }.awaitAll().filterNotNull()
         (historical + current)
@@ -484,7 +590,7 @@ class CwaWeatherDataSource(
             .takeLast(OBSERVATION_HISTORY_FRAME_COUNT)
     }
 
-    private fun radarMetadataForHistory(
+    private suspend fun radarMetadataForHistory(
         record: CwaHistoryRecord,
         current: CwaRadarImageMetadata,
     ): CwaRadarImageMetadata = if (record.url.substringBefore('?').endsWith(".png", ignoreCase = true)) {
@@ -493,7 +599,7 @@ class CwaWeatherDataSource(
         request(record.url).use { radarImageParser.parseMetadata(it.string()) }
     }
 
-    private fun satelliteMetadataForHistory(
+    private suspend fun satelliteMetadataForHistory(
         record: CwaHistoryRecord,
         current: CwaSatelliteImageMetadata,
     ): CwaSatelliteImageMetadata = if (
@@ -531,6 +637,7 @@ class CwaWeatherDataSource(
     ): WeatherGrid {
         val bytes = withContext(Dispatchers.IO) { request(metadata.productUrl).use { it.bytes() } }
         return withContext(PREPROCESSING_DISPATCHER) {
+            val processingContext = currentCoroutineContext()
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             check(bounds.outWidth > 1 && bounds.outHeight > 1) { "CWA 衛星影像尺寸無效" }
@@ -547,37 +654,52 @@ class CwaWeatherDataSource(
                 val pixels = IntArray(image.width * image.height)
                 image.getPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
                 satelliteImageParser.toGrid(
-                    metadata, image.width, image.height, pixels, datasetId, maxGridDimension,
-                )
+                    metadata,
+                    image.width,
+                    image.height,
+                    pixels,
+                    datasetId,
+                    maxGridDimension,
+                ) {
+                    processingContext.ensureActive()
+                }
             } finally {
                 image.recycle()
             }
         }
     }
 
-    private suspend fun fetchQuantitativeForecastFrames(): List<WeatherGrid> = withContext(Dispatchers.IO) {
+    private suspend fun fetchQuantitativeForecastFrames(): List<WeatherGrid> = coroutineScope {
         QUANTITATIVE_FORECAST_DATASET_IDS.mapIndexed { index, datasetId ->
-            val metadata = fetchBody(datasetId, "JSON").use {
-                quantitativeForecastParser.parseMetadata(it.string())
+            async {
+                quantitativeLoadSemaphore.withPermit {
+                    val (metadata, bytes) = withContext(Dispatchers.IO) {
+                        val loadedMetadata = fetchBody(datasetId, "JSON").use {
+                            quantitativeForecastParser.parseMetadata(it.string())
+                        }
+                        loadedMetadata to request(loadedMetadata.productUrl).use { it.bytes() }
+                    }
+                    withContext(PREPROCESSING_DISPATCHER) {
+                        val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            ?: error("CWA $datasetId 影像解碼失敗")
+                        try {
+                            val pixels = IntArray(image.width * image.height)
+                            image.getPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
+                            quantitativeForecastParser.toGrid(
+                                metadata = metadata,
+                                imageWidth = image.width,
+                                imageHeight = image.height,
+                                argbPixels = pixels,
+                                sourceId = datasetId,
+                                endHour = (index + 1) * 12,
+                            )
+                        } finally {
+                            image.recycle()
+                        }
+                    }
+                }
             }
-            val bytes = request(metadata.productUrl).use { it.bytes() }
-            val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                ?: error("CWA $datasetId 影像解碼失敗")
-            try {
-                val pixels = IntArray(image.width * image.height)
-                image.getPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
-                quantitativeForecastParser.toGrid(
-                    metadata = metadata,
-                    imageWidth = image.width,
-                    imageHeight = image.height,
-                    argbPixels = pixels,
-                    sourceId = datasetId,
-                    endHour = (index + 1) * 12,
-                )
-            } finally {
-                image.recycle()
-            }
-        }
+        }.awaitAll()
     }
 
     private fun decodeSampleSize(width: Int, height: Int, targetDimension: Int): Int {
@@ -589,7 +711,7 @@ class CwaWeatherDataSource(
         return sampleSize
     }
 
-    private fun fetchHistoryRecords(datasetId: String, currentAt: java.time.Instant): List<CwaHistoryRecord> {
+    private suspend fun fetchHistoryRecords(datasetId: String, currentAt: java.time.Instant): List<CwaHistoryRecord> {
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss").withZone(TAIPEI_ZONE)
         val url = "https://opendata.cwa.gov.tw/historyapi/v1/getMetadata/$datasetId".toHttpUrl()
             .newBuilder()
@@ -602,22 +724,24 @@ class CwaWeatherDataSource(
             )
             .addQueryParameter("timeTo", formatter.format(currentAt))
             .build()
-        return runCatching { request(url.toString()).use { historyParser.parse(it.string()) } }
+        return catchingCancellable { request(url.toString()).use { historyParser.parse(it.string()) } }
             .getOrDefault(emptyList())
             .filter { record -> record.observedAt?.let { it < currentAt } != false }
             .takeLast(OBSERVATION_HISTORY_FRAME_COUNT - 1)
     }
 
-    private fun fetchAnimationRecords(
+    private suspend fun fetchAnimationRecords(
         listUrl: String,
         filePrefix: String,
         baseUrl: String,
         datasetId: String,
         currentAt: java.time.Instant,
     ): List<CwaHistoryRecord> {
-        val animationRecords = runCatching {
-            val script = animationScriptCache.computeIfAbsent(listUrl) { url ->
-                request(url).use { it.string() }
+        val animationRecords = catchingCancellable {
+            val cached = animationScriptCache[listUrl]
+            val script = cached ?: animationCacheMutex.withLock {
+                animationScriptCache[listUrl] ?: request(listUrl).use { it.string() }
+                    .also { animationScriptCache[listUrl] = it }
             }
             animationFrameParser.parse(script, filePrefix, baseUrl)
         }.getOrDefault(emptyList())
@@ -634,7 +758,7 @@ class CwaWeatherDataSource(
     }
 
     private suspend fun fetchWindObservations() = withContext(Dispatchers.IO) {
-        fun fetch(elementFilter: Boolean): List<WindObservation> {
+        suspend fun fetch(elementFilter: Boolean): List<WindObservation> {
             val builder = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/$WIND_DATASET_ID".toHttpUrl()
                 .newBuilder()
                 .addQueryParameter("Authorization", apiKey)
@@ -645,9 +769,9 @@ class CwaWeatherDataSource(
             return request(builder.build().toString()).use { windParser.parse(it.string()) }
         }
 
-        runCatching { fetch(elementFilter = true) }
+        catchingCancellable { fetch(elementFilter = true) }
             .getOrElse { filteredError ->
-                runCatching { fetch(elementFilter = false) }
+                catchingCancellable { fetch(elementFilter = false) }
                     .getOrElse { unfilteredError ->
                         unfilteredError.addSuppressed(filteredError)
                         throw unfilteredError
@@ -655,7 +779,7 @@ class CwaWeatherDataSource(
             }
     }
 
-    private fun fetchBody(datasetId: String, format: String): okhttp3.ResponseBody {
+    private suspend fun fetchBody(datasetId: String, format: String): okhttp3.ResponseBody {
         val url = "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/$datasetId".toHttpUrl()
             .newBuilder()
             .addQueryParameter("Authorization", apiKey)
@@ -664,7 +788,7 @@ class CwaWeatherDataSource(
         return request(url.toString())
     }
 
-    private fun fetchForecastJson(datasetId: String): String {
+    private suspend fun fetchForecastJson(datasetId: String): String {
         val url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/$datasetId".toHttpUrl()
             .newBuilder()
             .addQueryParameter("Authorization", apiKey)
@@ -673,9 +797,9 @@ class CwaWeatherDataSource(
         return request(url.toString()).use { it.string() }
     }
 
-    private fun request(url: String): okhttp3.ResponseBody {
+    private suspend fun request(url: String): okhttp3.ResponseBody {
         val request = Request.Builder().url(url).build()
-        val response = client.newCall(request).execute()
+        val response = execute(request)
         if (!response.isSuccessful) {
             response.close()
             error("CWA 回應 ${response.code}")
@@ -683,12 +807,40 @@ class CwaWeatherDataSource(
         return response.body
     }
 
+    private suspend fun execute(request: Request): Response = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(
+            object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    if (continuation.isActive) continuation.resume(response)
+                    else response.close()
+                }
+            },
+        )
+    }
+
     private companion object {
+        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .callTimeout(25, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .build()
+
         const val WIND_DATASET_ID = "O-A0001-001"
+        const val CURRENT_WEATHER_DATASET_ID = "O-A0003-001"
+        const val CURRENT_WEATHER_ELEMENTS = "Weather,AirTemperature"
+        const val CURRENT_WEATHER_CANDIDATE_COUNT = 8
+        const val MAX_CURRENT_WEATHER_DISTANCE_KM = 100.0
         const val MODEL_WIND_URL = "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Model/M-A0064-000.grb2"
         const val GRIB_HEADER_RANGE_BYTES = 256L
         const val MAX_GRIB_MESSAGES = 512
         const val MAX_GRIB_FILE_BYTES = 512L * 1024L * 1024L
+        val WIND_DECODE_BOUNDS = com.rton.howstheweather.domain.GeoBounds(20.0, 117.5, 27.0, 124.5)
         // CWA keeps the M-A0064 message inventory stable between model cycles.
         // Every candidate is fully validated as a 10 m U/V GRIB message before
         // use; if the inventory changes, the lightweight header scan above
@@ -717,8 +869,10 @@ class CwaWeatherDataSource(
         const val RADAR_WIDE_SAMPLE_SIZE = 8
         const val RADAR_LOCAL_SAMPLE_SIZE = 4
         const val CLOUD_EAST_ASIA_MAX_DIMENSION = 320
-        const val CLOUD_LOCAL_MAX_DIMENSION = 800
+        const val CLOUD_LOCAL_MAX_DIMENSION = 400
         const val SATELLITE_DECODE_OVERSAMPLE = 2
+        const val HISTORY_DOWNLOAD_CONCURRENCY = 3
+        const val QUANTITATIVE_DOWNLOAD_CONCURRENCY = 2
         const val COUNTY_CANDIDATE_COUNT = 2
         const val MAX_COUNTY_DISTANCE_KM = 180.0
         val COUNTY_THREE_DAY_DATASET_IDS = mapOf(
@@ -758,29 +912,20 @@ class CwaWeatherDataSource(
 
 private data class ModelWindRanges(val east: LongRange, val north: LongRange)
 
+private sealed interface WindLoadResult {
+    data class Observations(val result: Result<List<WindObservation>>) : WindLoadResult
+    data class Model(val result: Result<WindGrid>) : WindLoadResult
+}
+
 private fun String?.appendFailures(vararg failures: String?): String? {
     val detail = failures.filterNotNull().takeIf(List<String>::isNotEmpty)?.joinToString("；") ?: return this
     return listOfNotNull(this, "CWA $detail").joinToString("；")
 }
 
-class CwaWithDemoFallbackDataSource(
-    private val live: WeatherDataSource,
-    private val fallback: WeatherDataSource = DemoWeatherDataSource(),
-) : WeatherDataSource {
-    override suspend fun load(target: GeoPoint): WeatherSnapshot = runCatching { live.load(target) }
-        .getOrElse { error ->
-            fallback.load(target).copy(
-                notice = "CWA 載入失敗：${error.message ?: "未知錯誤"} · 已改用示範格點",
-            )
-        }
-
-    override suspend fun enrich(snapshot: WeatherSnapshot, target: GeoPoint): WeatherSnapshot =
-        if (snapshot.isDemo) snapshot else live.enrich(snapshot, target)
-
-    override suspend fun loadAreaForecast(target: GeoPoint): AreaForecast? = live.loadAreaForecast(target)
-
-    override suspend fun loadWeeklyForecast(target: GeoPoint): AreaForecast? = live.loadWeeklyForecast(target)
-
-    override fun enrichmentUpdates(snapshot: WeatherSnapshot, target: GeoPoint): Flow<WeatherSnapshot> =
-        if (snapshot.isDemo) flowOf(snapshot) else live.enrichmentUpdates(snapshot, target)
+private suspend fun <T> catchingCancellable(block: suspend () -> T): Result<T> = try {
+    Result.success(block())
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (error: Throwable) {
+    Result.failure(error)
 }

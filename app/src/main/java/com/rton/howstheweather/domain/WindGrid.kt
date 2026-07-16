@@ -15,7 +15,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
-enum class WindProvenance { MODEL, OBSERVATION, DEMO, UNAVAILABLE }
+enum class WindProvenance { MODEL, OBSERVATION, UNAVAILABLE }
 
 /** A Lambert-conformal numerical wind field with earth-relative U/V components. */
 data class WindGrid(

@@ -11,7 +11,6 @@ import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -28,7 +27,6 @@ class WeatherSnapshotCacheTest {
 
         val restored = cache.read(issuedAt.plusSeconds(60))!!
 
-        assertFalse(restored.isDemo)
         assertEquals("O-A0059-001", restored.radar.sourceId)
         assertTrue(restored.radar.valueAt(1, 0).isNaN())
         assertEquals(WeatherUnit.MILLIMETERS_ONE_HOUR, restored.rainForecast.single().unit)
@@ -42,16 +40,6 @@ class WeatherSnapshotCacheTest {
         cache.write(snapshot(issuedAt))
 
         assertNull(cache.read(issuedAt.plus(Duration.ofMinutes(31))))
-    }
-
-    @Test fun `demo snapshot never replaces last known official cache`() = runTest {
-        val issuedAt = Instant.parse("2026-07-12T01:00:00Z")
-        val cache = WeatherSnapshotCache(temporaryFolder.newFolder(), Duration.ofHours(6))
-        cache.write(snapshot(issuedAt))
-        cache.write(snapshot(issuedAt.plusSeconds(60)).copy(isDemo = true))
-
-        val restored = cache.read(issuedAt.plusSeconds(120))!!
-        assertEquals(issuedAt, restored.issuedAt)
     }
 
     @Test fun `cache preserves a full official station observation set`() = runTest {
@@ -125,7 +113,6 @@ class WeatherSnapshotCacheTest {
             forecastAtTarget = listOf(ForecastPoint(60, 3.5f)),
             winds = listOf(WindObservation("臺北", GeoPoint(25.0, 121.5), 2f, 90f, issuedAt)),
             issuedAt = issuedAt,
-            isDemo = false,
             hourlyAccumulationAtTarget = 3.5f,
         )
     }
