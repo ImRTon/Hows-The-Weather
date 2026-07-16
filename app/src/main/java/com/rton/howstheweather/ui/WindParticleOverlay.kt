@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -13,6 +14,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.WindGrid
 import com.rton.howstheweather.domain.WindObservation
@@ -40,7 +44,9 @@ internal fun WindParticleOverlay(
 ) {
     if (windGrid == null && winds.isEmpty()) return
     var frameNanos by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(winds) {
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current.density
+    LaunchedEffect(Unit) {
         while (true) {
             withFrameNanos { frameNanos = it }
             delay(WIND_FRAME_INTERVAL_MILLIS)
@@ -49,56 +55,111 @@ internal fun WindParticleOverlay(
     val observations = remember(winds, mapCenter) {
         selectRelevantWinds(winds, mapCenter, MAX_RENDER_OBSERVATIONS).map(::asVector)
     }
-    Canvas(modifier) {
+    val particles = remember(windGrid, observations, mapCenter, mapZoom, canvasSize, density, darkMap) {
+        buildWindParticles(
+            windGrid = windGrid,
+            observations = observations,
+            mapCenter = mapCenter,
+            mapZoom = mapZoom,
+            width = canvasSize.width.toFloat(),
+            height = canvasSize.height.toFloat(),
+            density = density,
+            darkMap = darkMap,
+        )
+    }
+    Canvas(
+        modifier.onSizeChanged { size ->
+            if (canvasSize != size) canvasSize = size
+        },
+    ) {
         val timeSeconds = frameNanos / 1_000_000_000.0
         clipRect(0f, 0f, size.width, size.height) {
-            windParticleLayoutLayers(mapZoom).forEach { layout ->
-                val layoutZoom = layout.zoom.toFloat()
-                val worldSize = worldSizePixels(layoutZoom, density)
-                val screenScale = 2.0.pow((mapZoom - layoutZoom).toDouble()).toFloat()
-                val spacing = windParticleSpacingDp(layoutZoom) * density
-                val viewportWidth = size.width / screenScale
-                val viewportHeight = size.height / screenScale
-                val centerWorldX = longitudeToWorldX(mapCenter.longitude, worldSize)
-                val centerWorldY = mercatorY(mapCenter.latitude) * worldSize
-                val viewportLeft = centerWorldX - viewportWidth / 2.0
-                val viewportTop = centerWorldY - viewportHeight / 2.0
-                val firstColumn = floor(viewportLeft / spacing).toInt() - 1
-                val lastColumn = floor((viewportLeft + viewportWidth) / spacing).toInt() + 1
-                val firstRow = floor(viewportTop / spacing).toInt() - 1
-                val lastRow = floor((viewportTop + viewportHeight) / spacing).toInt() + 1
-                val screenSpacing = spacing * screenScale
+            particles.forEach { particle ->
+                val phase = (
+                    (timeSeconds * (.22 + particle.speed * .035) + pseudoRandom(particle.seed + 4096)) % 1.0
+                    ).toFloat()
+                val head = particle.base + particle.direction * (particle.travelDistance * phase)
+                drawComet(
+                    head = head,
+                    direction = particle.direction,
+                    length = particle.length,
+                    color = particle.color,
+                    alpha = windParticleAlpha(phase) * particle.layoutAlpha,
+                    scale = windParticleScale(phase),
+                    density = density,
+                )
+            }
+        }
+    }
+}
 
-                for (row in firstRow..lastRow) for (column in firstColumn..lastColumn) {
-                    val seed = windParticleSeed(column, row)
-                    val base = worldAnchoredParticleOrigin(
-                        column = column,
-                        row = row,
-                        viewportLeft = viewportLeft,
-                        viewportTop = viewportTop,
-                        spacing = spacing,
-                        screenScale = screenScale,
-                    )
-                    val point = screenToGeo(base, size.width, size.height, mapCenter, mapZoom, density)
-                    val vector = windGrid?.sample(point)?.let { components ->
-                        WindVector(point, components.eastMetersPerSecond, components.northMetersPerSecond)
-                    } ?: interpolate(point, observations)
-                    if (vector.speed < .15f) continue
+private data class RenderWindParticle(
+    val seed: Int,
+    val base: Offset,
+    val speed: Float,
+    val direction: Offset,
+    val travelDistance: Float,
+    val length: Float,
+    val layoutAlpha: Float,
+    val color: Color,
+)
 
-                    val phase = ((timeSeconds * (.22 + vector.speed * .035) + pseudoRandom(seed + 4096)) % 1.0).toFloat()
-                    val direction = vector.normalizedScreenDirection()
-                    val head = base + direction * (screenSpacing * 1.55f * phase)
-                    val color = windColor(vector.speed, darkMap)
-                    drawComet(
-                        head = head,
-                        direction = direction,
+private fun buildWindParticles(
+    windGrid: WindGrid?,
+    observations: List<WindVector>,
+    mapCenter: GeoPoint,
+    mapZoom: Float,
+    width: Float,
+    height: Float,
+    density: Float,
+    darkMap: Boolean,
+): List<RenderWindParticle> {
+    if (width <= 0f || height <= 0f) return emptyList()
+    return buildList {
+        windParticleLayoutLayers(mapZoom).forEach { layout ->
+            val layoutZoom = layout.zoom.toFloat()
+            val worldSize = worldSizePixels(layoutZoom, density)
+            val screenScale = 2.0.pow((mapZoom - layoutZoom).toDouble()).toFloat()
+            val spacing = windParticleSpacingDp(layoutZoom) * density
+            val viewportWidth = width / screenScale
+            val viewportHeight = height / screenScale
+            val centerWorldX = longitudeToWorldX(mapCenter.longitude, worldSize)
+            val centerWorldY = mercatorY(mapCenter.latitude) * worldSize
+            val viewportLeft = centerWorldX - viewportWidth / 2.0
+            val viewportTop = centerWorldY - viewportHeight / 2.0
+            val firstColumn = floor(viewportLeft / spacing).toInt() - 1
+            val lastColumn = floor((viewportLeft + viewportWidth) / spacing).toInt() + 1
+            val firstRow = floor(viewportTop / spacing).toInt() - 1
+            val lastRow = floor((viewportTop + viewportHeight) / spacing).toInt() + 1
+            val screenSpacing = spacing * screenScale
+
+            for (row in firstRow..lastRow) for (column in firstColumn..lastColumn) {
+                val seed = windParticleSeed(column, row)
+                val base = worldAnchoredParticleOrigin(
+                    column = column,
+                    row = row,
+                    viewportLeft = viewportLeft,
+                    viewportTop = viewportTop,
+                    spacing = spacing,
+                    screenScale = screenScale,
+                )
+                val point = screenToGeo(base, width, height, mapCenter, mapZoom, density)
+                val vector = windGrid?.sample(point)?.let { components ->
+                    WindVector(point, components.eastMetersPerSecond, components.northMetersPerSecond)
+                } ?: interpolate(point, observations)
+                if (vector.speed < .15f) continue
+                add(
+                    RenderWindParticle(
+                        seed = seed,
+                        base = base,
+                        speed = vector.speed,
+                        direction = vector.normalizedScreenDirection(),
+                        travelDistance = screenSpacing * 1.55f,
                         length = screenSpacing * .34f,
-                        color = color,
-                        alpha = windParticleAlpha(phase) * layout.alpha,
-                        scale = windParticleScale(phase),
-                        density = density,
-                    )
-                }
+                        layoutAlpha = layout.alpha,
+                        color = windColor(vector.speed, darkMap),
+                    ),
+                )
             }
         }
     }
@@ -305,8 +366,9 @@ internal fun windColor(speed: Float, darkMap: Boolean): Color = if (darkMap) {
 }
 
 private const val MAX_RENDER_OBSERVATIONS = 32
-private const val WIND_FRAME_INTERVAL_MILLIS = 40L
-private const val COMET_SEGMENTS = 3
+private const val WIND_TARGET_FPS = 30L
+private const val WIND_FRAME_INTERVAL_MILLIS = 1_000L / WIND_TARGET_FPS
+private const val COMET_SEGMENTS = 2
 private const val MIN_PARTICLE_LAYOUT_ZOOM = 0
 private const val MAX_PARTICLE_LAYOUT_ZOOM = 22
 private const val LAYOUT_ALPHA_EPSILON = .001f

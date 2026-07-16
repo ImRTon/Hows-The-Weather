@@ -298,7 +298,7 @@ private fun QuantitativeRainSummary(state: HomeUiState, modifier: Modifier = Mod
                 Text(
                     when (grid?.unit) {
                         WeatherUnit.MILLIMETERS_ONE_HOUR -> "未來 1 小時 · 累積預報"
-                        WeatherUnit.MILLIMETERS_PER_HOUR -> "示範雨率 · 非官方累積量"
+                        WeatherUnit.MILLIMETERS_PER_HOUR -> "即時雨率"
                         WeatherUnit.MILLIMETERS_TWELVE_HOURS -> {
                             val startHour = state.quantitativeForecastIndex * 12
                             "未來 $startHour–${startHour + 12} 小時 · 累積預報"

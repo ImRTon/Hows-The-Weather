@@ -9,9 +9,9 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.location.Location
-import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
@@ -47,7 +47,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
-import androidx.core.content.ContextCompat
 import com.google.android.gms.location.CurrentLocationRequest
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
@@ -71,6 +70,7 @@ import com.rton.howstheweather.render.WeatherRenderStyle
 import com.rton.howstheweather.render.WeatherTileProvider
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlin.math.abs
@@ -78,7 +78,6 @@ import kotlin.math.roundToInt
 
 @Composable
 fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
-    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -89,15 +88,6 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
             )
             viewModel.clearMessage()
         }
-    }
-    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) viewModel.scheduleReminder()
-    }
-    val scheduleReminder = {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        else viewModel.scheduleReminder()
     }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -110,7 +100,6 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
             AppDestination.NOW -> ResizableWeatherPanels(
                 state = state,
                 viewModel = viewModel,
-                onReminder = scheduleReminder,
                 modifier = Modifier.padding(padding).fillMaxSize(),
             )
             AppDestination.FORECAST -> ForecastScreen(
@@ -239,7 +228,6 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
 private fun ResizableWeatherPanels(
     state: HomeUiState,
     viewModel: HomeViewModel,
-    onReminder: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier) {
@@ -247,7 +235,7 @@ private fun ResizableWeatherPanels(
         val totalHeight = maxHeight
         val handleTouchHeight = 48.dp
         val handleVisualHeight = 8.dp
-        val minCard = 64.dp
+        val minCard = 48.dp
         val minMap = 180.dp
         val bounds = calculateResizablePanelBounds(
             totalHeight = totalHeight.value,
@@ -258,8 +246,8 @@ private fun ResizableWeatherPanels(
         )
         val actualHandleVisualHeight = bounds.handleHeight.dp
         fun fraction(anchor: PanelAnchor) = when (anchor) {
-            PanelAnchor.DECISION -> 0.68f
-            PanelAnchor.BALANCED -> 0.40f
+            PanelAnchor.DECISION -> 0.48f
+            PanelAnchor.BALANCED -> 0.30f
             PanelAnchor.MAP -> if (bounds.totalHeight > 0f) {
                 bounds.minDecisionHeight / bounds.totalHeight
             } else {
@@ -285,7 +273,6 @@ private fun ResizableWeatherPanels(
         Box(Modifier.fillMaxSize()) {
             DecisionPanel(
                 state = state,
-                onReminder = onReminder,
                 modifier = Modifier.fillMaxWidth().height(displayedHeight),
             )
             WeatherMap(
@@ -299,6 +286,14 @@ private fun ResizableWeatherPanels(
                             .coerceAtLeast(0f)
                             .dp,
                     ),
+            )
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(actualHandleVisualHeight)
+                    .offset(y = displayedHeight)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .zIndex(1f),
             )
             PanelHandle(
                 onClick = viewModel::cyclePanel,
@@ -353,37 +348,182 @@ private fun PanelHandle(onClick: () -> Unit, visualHeight: Dp, modifier: Modifie
 }
 
 @Composable
-private fun DecisionPanel(state: HomeUiState, onReminder: () -> Unit, modifier: Modifier = Modifier) {
+private fun DecisionPanel(state: HomeUiState, modifier: Modifier = Modifier) {
     val collapsed = state.panelAnchor == PanelAnchor.MAP
+    val expanded = state.panelAnchor == PanelAnchor.DECISION
+    val forecastPeriods = state.areaForecast?.periods.orEmpty()
+        .ifEmpty { state.weeklyForecast?.periods.orEmpty() }
+    val now = remember(forecastPeriods, state.target.coordinate) { java.time.Instant.now() }
+    val priorityPeriods = remember(forecastPeriods, now) {
+        PriorityForecastSelector.select(forecastPeriods, now)
+    }
+    val upcomingRain = remember(state.areaForecast, now) {
+        val until = now.plusSeconds(12 * 60 * 60L)
+        state.areaForecast?.periods.orEmpty()
+            .filter { it.endAt > now && it.startAt < until }
+            .sortedBy(AreaForecastPeriod::startAt)
+            .take(4)
+    }
     Surface(modifier, color = MaterialTheme.colorScheme.surface) {
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(horizontal = 20.dp, vertical = if (collapsed) 6.dp else 10.dp)
+                .padding(horizontal = 20.dp, vertical = if (collapsed) 8.dp else 10.dp)
                 .animateContentSize(),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(if (collapsed) 3.dp else 8.dp),
         ) {
-            Text(
-                state.decision.headline,
-                style = if (collapsed) MaterialTheme.typography.titleMedium else MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    state.decision.headline,
+                    modifier = Modifier.weight(1f),
+                    style = if (collapsed) MaterialTheme.typography.titleMedium else MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (collapsed) {
+                    Spacer(Modifier.width(12.dp))
+                    Icon(
+                        Icons.Default.WaterDrop,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        priorityPeriods.firstOrNull()?.precipitationProbabilityPercent?.let { "降雨 $it%" }
+                            ?: "降雨 —",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             if (!collapsed) {
-                Text(state.decision.detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.weight(1f))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.WaterDrop, null, tint = rainStateColor(state.decision.state), modifier = Modifier.size(18.dp))
-                    Text("  ${rainStateLabel(state.decision.state)}", style = MaterialTheme.typography.labelLarge)
-                    Spacer(Modifier.weight(1f))
-                    Button(
-                        onClick = onReminder,
-                        enabled = state.decision.eventWindow != null && !state.reminderScheduled,
-                    ) {
-                        Icon(if (state.reminderScheduled) Icons.Default.NotificationsActive else Icons.Default.AddAlert, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (state.reminderScheduled) "已設定" else "到時提醒我")
+                PriorityForecastRow(
+                    periods = priorityPeriods,
+                    loading = state.areaForecastLoading && state.weeklyForecastLoading,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (expanded) {
+                UpcomingRainStrip(upcomingRain, Modifier.fillMaxWidth())
+                CurrentObservationLine(
+                    observation = state.currentWeather,
+                    loading = state.currentWeatherLoading,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PriorityForecastRow(
+    periods: List<PriorityForecastPeriod>,
+    loading: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (periods.isEmpty()) {
+        Surface(
+            modifier = modifier.heightIn(min = 76.dp),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .42f),
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                Text(
+                    if (loading) "正在取得今天與明天預報" else "今天與明天預報暫缺",
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        return
+    }
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        periods.forEach { period ->
+            PriorityForecastCard(period, Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun PriorityForecastCard(period: PriorityForecastPeriod, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.heightIn(min = 108.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .48f),
+    ) {
+        Column(
+            Modifier
+                .padding(horizontal = 9.dp, vertical = 8.dp)
+                .semantics {
+                    contentDescription = buildString {
+                        append(period.label).append('，').append(period.weatherDescription)
+                        period.precipitationProbabilityPercent?.let {
+                            append("，降雨機率").append(it).append("百分比")
+                        }
+                        append('，').append(formatPriorityTemperature(period))
+                    }
+                },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(period.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    weatherIcon(period.weatherDescription),
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = weatherIconColor(period.weatherDescription),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    period.weatherDescription,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.WaterDrop, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                Text(
+                    period.precipitationProbabilityPercent?.let { " $it%" } ?: " —",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Text(formatPriorityTemperature(period), style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun UpcomingRainStrip(periods: List<AreaForecastPeriod>, modifier: Modifier = Modifier) {
+    if (periods.isEmpty()) return
+    val formatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.of("Asia/Taipei")) }
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .32f),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text("接下來 12 小時降雨機率", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                periods.forEach { period ->
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(formatter.format(period.startAt), style = MaterialTheme.typography.labelSmall)
+                        Text(
+                            period.precipitationProbabilityPercent?.let { "$it%" } ?: "—",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
             }
@@ -392,98 +532,60 @@ private fun DecisionPanel(state: HomeUiState, onReminder: () -> Unit, modifier: 
 }
 
 @Composable
-private fun AreaForecastStrip(
-    forecast: AreaForecast?,
+private fun CurrentObservationLine(
+    observation: CurrentWeatherObservation?,
     loading: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
-    val timeFormatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()) }
-
-    Column(
-        modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f))
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    val formatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.of("Asia/Taipei")) }
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .32f),
     ) {
-        if (forecast == null) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.CenterStart) {
-                Text(
-                    if (loading) "正在取得目標附近的鄉鎮預報" else "此位置暫無鄉鎮時段預報",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = labelColor,
-                )
-            }
-        } else {
-            Row(
-                Modifier.fillMaxWidth().weight(1f).horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                forecast.periods.forEachIndexed { index, period ->
-                    AreaForecastPeriodCard(
-                        period = period,
-                        timeFormatter = timeFormatter,
-                        showDemoLabel = forecast.isDemo && index == 0,
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            when {
+                observation != null -> {
+                    val description = observation.weatherDescription ?: "目前天氣"
+                    Icon(
+                        weatherIcon(description),
+                        contentDescription = null,
+                        modifier = Modifier.size(21.dp),
+                        tint = weatherIconColor(description),
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        buildString {
+                            append("目前 ").append(description)
+                            observation.temperatureCelsius?.let { append(" · ").append(formatOneDecimal(it, "°C")) }
+                        },
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "${observation.stationName} ${formatter.format(observation.observedAt)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                loading -> Text("目前觀測載入中", style = MaterialTheme.typography.bodyMedium)
+                else -> Text(
+                    "目前觀測暫缺",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
 }
 
-@Composable
-private fun AreaForecastPeriodCard(
-    period: AreaForecastPeriod,
-    timeFormatter: DateTimeFormatter,
-    showDemoLabel: Boolean,
-) {
-    val description = period.weatherDescription.ifBlank { "天氣未定" }
-    Column(
-        Modifier
-            .width(92.dp)
-            .fillMaxHeight()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = .72f))
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-            .semantics {
-                contentDescription = buildString {
-                    append(timeFormatter.format(period.startAt)).append("至")
-                    append(timeFormatter.format(period.endAt)).append('，').append(description)
-                    period.precipitationProbabilityPercent?.let { append("，降雨機率").append(it).append("百分比") }
-                    append('，').append(formatTemperatureRange(period))
-                }
-            },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(timeFormatter.format(period.startAt), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-            if (showDemoLabel) {
-                Text(" · 示範", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-            }
-        }
-        Icon(
-            weatherIcon(description),
-            contentDescription = null,
-            tint = weatherIconColor(description),
-            modifier = Modifier.size(26.dp),
-        )
-        Text(description, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.WaterDrop, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
-            Text(
-                " ${period.precipitationProbabilityPercent?.let { "$it%" } ?: "—"}",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-        Text(formatTemperatureRange(period), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
-    }
-}
-
-private fun formatTemperatureRange(period: AreaForecastPeriod): String {
+private fun formatPriorityTemperature(period: PriorityForecastPeriod): String {
     val minimum = period.minimumTemperatureCelsius
     val maximum = period.maximumTemperatureCelsius
     return when {
@@ -492,6 +594,9 @@ private fun formatTemperatureRange(period: AreaForecastPeriod): String {
         else -> "$minimum–$maximum°C"
     }
 }
+
+private fun formatOneDecimal(value: Float, suffix: String): String =
+    String.format(Locale.TAIWAN, "%.1f%s", value, suffix)
 
 private fun weatherIcon(description: String): ImageVector = when {
     "雷" in description -> Icons.Default.Thunderstorm
@@ -790,8 +895,7 @@ private fun WindLegend(provenance: WindProvenance, darkMap: Boolean, modifier: M
                 when (provenance) {
                     WindProvenance.MODEL -> "WRF 3 km · 10 m 模式風"
                     WindProvenance.OBSERVATION -> "氣象署測站觀測內插"
-                    WindProvenance.DEMO -> "示範測站內插"
-                    WindProvenance.UNAVAILABLE -> "風場資料載入中"
+                    WindProvenance.UNAVAILABLE -> "風場資料尚不可用"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -812,10 +916,9 @@ private fun MapControls(state: HomeUiState, viewModel: HomeViewModel, modifier: 
             onClick = { viewModel.setPrimaryLayer(PrimaryLayer.RADAR_RAIN) },
             label = {
                 Text(
-                    if (state.selectedMinute <= 0 && state.radarCoverage == RadarCoverage.WIDE) {
-                        "廣域雷達"
-                    } else {
-                        "降雨雷達"
+                    when (state.radarCoverage) {
+                        RadarCoverage.WIDE -> "廣域雷達"
+                        RadarCoverage.LOCAL -> if (state.radarRegionalLoading) "區域載入中" else "區域雷達"
                     },
                 )
             },
@@ -954,22 +1057,4 @@ private fun WeatherLegend(unit: WeatherUnit) {
             }
         }
     }
-}
-
-private fun rainStateLabel(state: RainState) = when (state) {
-    RainState.DRY -> "無雨"
-    RainState.LIGHT -> "小雨"
-    RainState.MODERATE -> "中雨"
-    RainState.HEAVY -> "大雨"
-    RainState.EXTREME -> "強降雨"
-    RainState.UNAVAILABLE -> "資料不足"
-}
-
-private fun rainStateColor(state: RainState) = when (state) {
-    RainState.DRY -> Color(0xFF71858F)
-    RainState.LIGHT -> Color(0xFF37D6E6)
-    RainState.MODERATE -> Color(0xFF6D3AC6)
-    RainState.HEAVY -> Color(0xFFE64A54)
-    RainState.EXTREME -> Color(0xFFF49A38)
-    RainState.UNAVAILABLE -> Color.Gray
 }

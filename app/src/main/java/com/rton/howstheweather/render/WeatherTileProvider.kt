@@ -37,34 +37,44 @@ class WeatherTileProvider(
     }
 
     private fun renderTile(x: Int, y: Int, zoom: Int): ByteArray {
-        val renderSize = if (zoom < FULL_RESOLUTION_ZOOM) PREVIEW_SIZE else TILE_SIZE
-        var bitmap = Bitmap.createBitmap(renderSize, renderSize, Bitmap.Config.ARGB_8888)
+        val renderSize = TILE_SIZE
+        val bitmap = Bitmap.createBitmap(renderSize, renderSize, Bitmap.Config.ARGB_8888)
         val values = if (style.contours.isNotEmpty()) {
-            Array(renderSize) { FloatArray(renderSize) { Float.NaN } }
+            Array(renderSize + CONTOUR_GUTTER * 2) {
+                FloatArray(renderSize + CONTOUR_GUTTER * 2) { Float.NaN }
+            }
         } else null
         val pixels = IntArray(renderSize * renderSize)
         val n = 2.0.pow(zoom)
-        val longitudes = DoubleArray(renderSize) { px ->
-            ((x + px / renderSize.toDouble()) / n) * 360.0 - 180.0
+        val sampleSize = values?.size ?: renderSize
+        val sampleOffset = if (values == null) 0 else -CONTOUR_GUTTER
+        val longitudes = DoubleArray(sampleSize) { index ->
+            val px = index + sampleOffset
+            ((x + (px + PIXEL_CENTER) / renderSize) / n) * 360.0 - 180.0
         }
-        val latitudes = DoubleArray(renderSize) { py ->
-            val worldY = (y + py / renderSize.toDouble()) / n
+        val latitudes = DoubleArray(sampleSize) { index ->
+            val py = index + sampleOffset
+            val worldY = (y + (py + PIXEL_CENTER) / renderSize) / n
             Math.toDegrees(atan(kotlin.math.sinh(PI * (1 - 2 * worldY))))
+        }
+        if (values != null) {
+            for (py in values.indices) for (px in values[py].indices) {
+                val value = grid.sample(latitudes[py], longitudes[px]) ?: Float.NaN
+                values[py][px] = value
+            }
         }
         for (py in 0 until renderSize) {
             for (px in 0 until renderSize) {
-                val value = grid.sample(latitudes[py], longitudes[px]) ?: Float.NaN
-                values?.get(py)?.set(px, value)
+                val value = if (values == null) {
+                    grid.sample(latitudes[py], longitudes[px]) ?: Float.NaN
+                } else {
+                    values[py + CONTOUR_GUTTER][px + CONTOUR_GUTTER]
+                }
                 pixels[py * renderSize + px] = style.colorFor(value)
             }
         }
         bitmap.setPixels(pixels, 0, renderSize, 0, 0, renderSize, renderSize)
         if (values != null) drawContours(bitmap, values, renderSize)
-        if (renderSize != TILE_SIZE) {
-            val preview = bitmap
-            bitmap = Bitmap.createScaledBitmap(preview, TILE_SIZE, TILE_SIZE, true)
-            preview.recycle()
-        }
         val bytes = ByteArrayOutputStream().use {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
             it.toByteArray()
@@ -80,17 +90,23 @@ class WeatherTileProvider(
             strokeWidth = 1.25f
         }
         style.contours.forEach { threshold ->
-            for (py in 1 until size - 1) {
-                for (px in 1 until size - 1) {
-                    val value = values[py][px]
+            for (py in 0 until size) {
+                for (px in 0 until size) {
+                    val sampleX = px + CONTOUR_GUTTER
+                    val sampleY = py + CONTOUR_GUTTER
+                    val value = values[sampleY][sampleX]
                     if (!value.isFinite()) continue
-                    val crosses = (values[py][px + 1] - threshold) * (value - threshold) < 0f ||
-                        (values[py + 1][px] - threshold) * (value - threshold) < 0f
+                    val crosses = crossesThreshold(value, values[sampleY][sampleX + 1], threshold) ||
+                        crossesThreshold(value, values[sampleY + 1][sampleX], threshold)
                     if (crosses) canvas.drawPoint(px.toFloat(), py.toFloat(), paint)
                 }
             }
         }
     }
+
+    private fun crossesThreshold(first: Float, second: Float, threshold: Float): Boolean =
+        first.isFinite() && second.isFinite() &&
+            ((first < threshold && second >= threshold) || (first >= threshold && second < threshold))
 
     private fun intersectsGrid(tileX: Int, tileY: Int, zoom: Int): Boolean {
         val northWest = tilePixelToGeo(tileX, tileY, zoom, 0, 0)
@@ -103,6 +119,7 @@ class WeatherTileProvider(
     }
 
     private fun cacheKey(x: Int, y: Int, zoom: Int): String = buildString(96) {
+        append(RENDERER_VERSION).append('|')
         append(grid.sourceId).append('|').append(grid.validAt.epochSecond)
         append('|').append(grid.width).append('x').append(grid.height)
         append('|').append(style.theme).append('|').append(style.unit)
@@ -121,8 +138,9 @@ class WeatherTileProvider(
 
     companion object {
         const val TILE_SIZE = 256
-        private const val PREVIEW_SIZE = 128
-        private const val FULL_RESOLUTION_ZOOM = 11
+        private const val PIXEL_CENTER = 0.5
+        private const val CONTOUR_GUTTER = 1
+        private const val RENDERER_VERSION = 2
         private const val CACHE_BYTES = 24 * 1024 * 1024
         private val renderLocks = ConcurrentHashMap<String, Any>()
         private val tileCache = object : LruCache<String, ByteArray>(CACHE_BYTES) {
