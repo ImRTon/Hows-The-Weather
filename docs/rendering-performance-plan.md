@@ -2,27 +2,38 @@
 
 ## Product constraint
 
-Radar and cloud playback is observation-only: `-30`, `-20`, `-10`, then `0` minutes. No motion estimate, wind-assisted advection, or rendered pixel may become future weather or decision input.
+Radar and cloud playback is observation-only: `-90` through `0` minutes at 10-minute intervals. No motion estimate, wind-assisted advection, or rendered pixel may become future weather or decision input.
 
 ## Implemented CPU pipeline
 
-The loading path is split by user-visible priority:
+The loading path is split by user-visible priority and never ties the global loading state to optional layers:
 
-1. Download and decode the current wide radar, current local radar, and official one-hour rainfall concurrently.
-2. Publish those critical fields immediately.
-3. In independent coroutines, load radar history, cloud imagery, and wind. Each completed family is emitted without waiting for the slowest family.
-4. Download historical frames concurrently. Bound bitmap decoding, satellite reprojection, and LOD harmonization to two `Dispatchers.Default` workers so network work does not occupy CPU workers and preprocessing cannot saturate every core.
-5. Generate deterministic demo supplements only if a live supplemental source actually fails.
+1. Race a lightweight last-known-good snapshot against the live request; cache decompression must never delay the first live radar request. The startup cache retains current frames and wind, not the 90-minute animation history.
+2. Download, decode, and publish the current wide radar by itself, then end the global loading state. It does not wait for the regional radar or official one-hour forecast.
+3. Load the official one-hour decision forecast and regional radar in separate high-priority jobs. Radar LOD automatically switches between wide and regional products using zoom hysteresis and coverage bounds; while regional data is pending, the visible wide radar remains in place.
+4. Load only current cloud frames and quantitative precipitation as cancellable background enrichment. The four quantitative products use two-way bounded parallelism.
+5. Load the 90-minute radar or cloud history only when playback or a negative timeline position requests it. A radar interaction preempts lower-priority enrichment; cloud history may begin as soon as a current cloud frame exists.
+6. Persist the wind switch. When it was on, load wind immediately; otherwise reuse cache and start a delayed idle preload. Live wind emits CWA station observations first and upgrades to the WRF model grid when ready.
+7. Bound historical downloads to three and bitmap/GRIB preprocessing to two `Dispatchers.Default` workers so preprocessing cannot saturate every core.
+8. Give every HTTP call a total timeout and coroutine cancellation hook. Cap the entire first live radar load at 15 seconds; on failure retain the last official cache or report the layer unavailable.
+9. Merge independently completed official observations in `HomeViewModel`, preserving compatible cached history and preferring model wind over station wind, so completion order cannot regress the visible state.
 
 The first satellite optimization pass additionally:
 
 - downsamples source bitmaps during decode to at most twice the requested grid dimension;
+- caps the Taiwan cloud output at 400 cells on its longest axis instead of processing the source at full output resolution;
 - caches the global geostationary-to-grid pixel lookup by image/grid geometry;
 - selects only the required lower-quartile rank instead of sorting all 25 neighborhood samples;
 - publishes global and Taiwan current cloud frames independently, then applies cross-LOD tone harmonization;
 - debounces and serializes full snapshot cache writes instead of rewriting after every enrichment event.
 
-Cloud acquisition is Taiwan-first. As soon as the current Taiwan-and-surroundings frame is published, the current East Asia frame and Taiwan history start in parallel; the current East Asia result is published before either region's remaining history. East Asia is processed at a maximum grid dimension of 320. The former global full-disk product is no longer downloaded. `O-B0032-003` supplies the smaller official East Asia black-and-white IR image. Its fixed 800-to-320 Lambert pixel lookup is generated during the Android build and bundled as a read-only resource; runtime reprojection remains only as a dimension/bounds compatibility fallback.
+Cloud acquisition is Taiwan-first. The current Taiwan-and-surroundings frame is published before the current East Asia frame; historical frames do not start until the user requests playback or history. East Asia is processed at a maximum grid dimension of 320. The former global full-disk product is no longer downloaded. `O-B0032-003` supplies the smaller official East Asia black-and-white IR image. Its fixed 800-to-320 Lambert pixel lookup is generated during the Android build and bundled as a read-only resource; runtime reprojection remains only as a dimension/bounds compatibility fallback.
+
+WRF GRIB decoding now projects the Taiwan bounds into the Lambert source grid before unpacking values. It downloads the two required U/V messages in parallel but unpacks only the bounded Taiwan window, with row-level cancellation checks, rather than allocating and decoding both full model grids.
+
+Wind particles no longer project screen coordinates and sample the wind grid again for every particle on every animation frame. Particle position/vector/color data is rebuilt only when the map, canvas, or wind source changes; steady animation runs at 30 fps with a two-segment trail. This keeps the persisted-on wind state responsive without restoring the former per-frame computation.
+
+The production tile renderer already uses the 256-entry OKLab LUT, low-zoom preview tiles, request coalescing, and an encoded-tile LRU cache. GPU work remains a measured follow-up because Google Maps still requires PNG tile bytes.
 
 The two-worker limit is an initial safety value, not a permanent tuning constant. Measure it on a low/mid-range physical device before raising it. Memory pressure matters more than peak throughput because each decoded image temporarily owns compressed bytes, a bitmap, an ARGB array, and a float grid.
 
@@ -43,6 +54,14 @@ Targets for the first optimization pass on the chosen reference device:
 - network current radar visible without waiting for any history, cloud, or wind request;
 - layer switching shows a cached frame within one rendered frame and an uncached viewport within 500 ms;
 - no main-thread image conversion, grid harmonization, tile rendering, or cache compression.
+
+### 2026-07-15 physical-device check
+
+- Debug cold Activity launch reported by Android: 749 ms with existing app data retained.
+- After startup enrichment settled, the process and every `DefaultDispatcher` worker sampled at 0% CPU.
+- The previous failure signature—one `DefaultDispatcher` worker remaining near a full core for minutes—was not reproduced.
+- After the radar publication regression fix, the on-device startup cache settled at about 642 KiB and the radar range control visibly exposed `廣域雷達 ↔ 區域雷達`.
+- A subsequent thread-level trace identified the persisted wind animation—not radar/cloud acquisition—as the remaining steady UI load. After precomputation, the 12.5 fps baseline produced a short visible-window process sample of about 0.3% CPU on the same device; the user-facing target is now 30 fps and should be re-profiled separately.
 
 ## GPU feasibility
 

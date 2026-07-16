@@ -15,10 +15,11 @@ The home screen is one vertically split workspace:
 - The upper panel is the decision card.
 - The lower panel is the interactive Google map.
 - A 48 dp accessible drag handle continuously resizes the panels and settles at three anchors:
-  - `Decision`: decision card receives about 68% of available height.
-  - `Balanced`: decision card receives about 40%.
-  - `Map`: decision card collapses to an approximately 112 dp summary.
+  - `Decision`: decision card receives about 48% of available height, enough for the expanded content without a large empty spacer.
+  - `Balanced`: decision card receives about 30%, closely wrapping the three priority forecast cards.
+  - `Map`: decision card collapses to an approximately 48 dp one-line summary, with the rain probability aligned to the right.
 - Tapping the handle cycles through the same anchors.
+- Keep the visual divider between the decision card and map continuous across the full width; the short drag bar overlays that divider without creating a black gap.
 - Preserve the selected anchor and theme through state restoration.
 
 The decision card leads with one plain-language conclusion, followed by source time and supporting detail. It should never require users to decode a heatmap before knowing whether leaving is sensible.
@@ -129,6 +130,14 @@ Before handing off a change, run:
 $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
 ./gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:lintDebug --console=plain
 ```
+
+### Physical-device installation policy
+
+- Install or update the app on a phone **only through Android Studio**: select the connected device, choose the `app` run configuration, then use **Run > Run 'app'** (`Shift+F10`). This is the required device-install instruction for the current debug APK.
+- Never install, update, downgrade, or remove the phone app through `adb install`, `adb uninstall`, `pm install`, `pm uninstall`, Gradle `installDebug`, `bundletool`, a file manager, or any other non-Android-Studio path.
+- Never run `connectedAndroidTest`, `connectedDebugAndroidTest`, or another workflow that installs an instrumentation/test APK on the phone. Do not create or install an extra test app/package for device verification, because it can replace, remove, or disturb the primary app installation.
+- Command-line device access is limited to read-only diagnostics such as `adb logcat`, `dumpsys`, and UI inspection. It must not mutate installed packages or app data.
+- The Gradle validation command above may assemble an APK, but it does not authorize installing that APK. After a build, the user must deploy it through Android Studio `Run 'app'` before device verification continues.
 
 At minimum, preserve tests for:
 
