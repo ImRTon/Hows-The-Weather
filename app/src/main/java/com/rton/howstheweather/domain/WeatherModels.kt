@@ -61,6 +61,45 @@ data class WeatherGrid(
         val bottom = bottomLeft + (bottomRight - bottomLeft) * tx
         return top + (bottom - top) * ty
     }
+
+    /**
+     * Creates a render-only temporal frame between two compatible numerical grids.
+     * Official observations remain unchanged; this derived grid must not feed decisions.
+     */
+    fun interpolateForDisplay(next: WeatherGrid, fraction: Float): WeatherGrid {
+        require(canInterpolateWith(next)) { "Weather grids are not compatible for temporal interpolation" }
+        val progress = fraction.coerceIn(0f, 1f)
+        if (progress <= 0f) return this
+        if (progress >= 1f) return next
+
+        val interpolatedValues = FloatArray(values.size) { index ->
+            val from = values[index]
+            val to = next.values[index]
+            if (!from.isFinite() || !to.isFinite() || from == missingValue || to == next.missingValue) {
+                Float.NaN
+            } else {
+                from + (to - from) * progress
+            }
+        }
+        val intervalMillis = next.validAt.toEpochMilli() - validAt.toEpochMilli()
+        return copy(
+            values = interpolatedValues,
+            validAt = validAt.plusMillis((intervalMillis * progress).toLong()),
+            missingValue = Float.NaN,
+            sourceId = if (sourceId == next.sourceId) {
+                "$sourceId:temporal-interpolation"
+            } else {
+                "$sourceId->${next.sourceId}:temporal-interpolation"
+            },
+        )
+    }
+
+    fun canInterpolateWith(other: WeatherGrid): Boolean =
+        width == other.width &&
+            height == other.height &&
+            unit == other.unit &&
+            bounds == other.bounds &&
+            resolutionKm == other.resolutionKm
 }
 
 enum class PrimaryLayer { RADAR_RAIN, ONE_HOUR_RAIN, CLOUD }
@@ -192,12 +231,14 @@ data class HomeUiState(
     val target: TargetLocation,
     val decision: ForecastDecision,
     val currentWeather: CurrentWeatherObservation? = null,
-    val currentWeatherLoading: Boolean = false,
+    val currentWeatherLoading: Boolean = true,
     val currentWeatherUnavailableReason: String? = null,
     val areaForecast: AreaForecast? = null,
-    val areaForecastLoading: Boolean = false,
+    val areaForecastLoading: Boolean = true,
+    val areaForecastUnavailableReason: String? = null,
     val weeklyForecast: AreaForecast? = null,
-    val weeklyForecastLoading: Boolean = false,
+    val weeklyForecastLoading: Boolean = true,
+    val weeklyForecastUnavailableReason: String? = null,
     val airQuality: AirQualityObservation? = null,
     val airQualityLoading: Boolean = false,
     val airQualityUnavailableReason: String? = null,
@@ -206,6 +247,8 @@ data class HomeUiState(
     val panelAnchor: PanelAnchor = PanelAnchor.BALANCED,
     val layers: LayerSelection = LayerSelection(),
     val isPlaying: Boolean = false,
+    val isPlaybackPending: Boolean = false,
+    val isHistoryLoading: Boolean = false,
     val legendExpanded: Boolean = false,
     val themePreference: ThemePreference = ThemePreference.SYSTEM,
     val activeGrid: WeatherGrid? = null,

@@ -2,6 +2,7 @@ package com.rton.howstheweather.domain
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 
@@ -28,6 +29,35 @@ class WeatherGridTest {
     @Test fun `missing corner does not become dry weather`() {
         val missing = grid.copy(values = floatArrayOf(0f, Float.NaN, 20f, 30f))
         assertNull(missing.sample(GeoPoint(1.0, 1.0)))
+    }
+
+    @Test fun `temporal interpolation blends numerical values and effective time`() {
+        val next = grid.copy(
+            values = floatArrayOf(10f, 20f, 30f, 40f),
+            validAt = Instant.EPOCH.plusSeconds(600),
+        )
+
+        val halfway = grid.interpolateForDisplay(next, .5f)
+
+        assertEquals(5f, halfway.valueAt(0, 0), .0001f)
+        assertEquals(25f, halfway.valueAt(0, 1), .0001f)
+        assertEquals(Instant.EPOCH.plusSeconds(300), halfway.validAt)
+        assertEquals("fixture:temporal-interpolation", halfway.sourceId)
+    }
+
+    @Test fun `temporal interpolation preserves missing data`() {
+        val missing = grid.copy(values = floatArrayOf(0f, Float.NaN, 20f, 30f))
+        val next = grid.copy(
+            values = floatArrayOf(10f, 10f, Float.NaN, 40f),
+            validAt = Instant.EPOCH.plusSeconds(600),
+        )
+
+        val halfway = missing.interpolateForDisplay(next, .5f)
+
+        assertEquals(5f, halfway.valueAt(0, 0), .0001f)
+        assertTrue(halfway.valueAt(1, 0).isNaN())
+        assertTrue(halfway.valueAt(0, 1).isNaN())
+        assertEquals(35f, halfway.valueAt(1, 1), .0001f)
     }
 
     @Test fun `longitude wraps across antimeridian for satellite grids`() {

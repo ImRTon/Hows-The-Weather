@@ -2,6 +2,7 @@ package com.rton.howstheweather
 
 import android.app.Application
 import android.content.Context
+import android.os.SystemClock
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -75,11 +76,16 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private var regionalRadarJob: Job? = null
     private var enrichmentJob: Job? = null
     private var historyJob: Job? = null
+    private var historyJobKind: WeatherHistoryKind? = null
     private var windJob: Job? = null
     private var windIdlePreloadJob: Job? = null
     private var currentWeatherJob: Job? = null
     private var areaForecastJob: Job? = null
     private var cacheWriteJob: Job? = null
+    private var playbackJob: Job? = null
+    private var historyLoadFailure: Throwable? = null
+    private var historyLoadFailureKind: WeatherHistoryKind? = null
+    private var historyLoadingRequest: HistoryLoadingRequest? = null
     private val cacheWriteMutex = Mutex()
     private var cacheWriteGeneration = 0L
     private var refreshSequence = 0L
@@ -87,6 +93,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private var panelSelectionChanged = false
     private var windSelectionChanged = false
     private var requestedHistoryKind: WeatherHistoryKind? = null
+    private val presentedWeatherFrame = MutableStateFlow<WeatherFramePresentationKey?>(null)
     private val initialTarget = TargetLocation(GeoPoint(25.0478, 121.5319), "臺北市中心", false)
     private val emptyDecision = decisionEngine.evaluate(listOf(ForecastPoint(0, null)), Instant.now())
     private val _uiState = MutableStateFlow(
@@ -279,7 +286,10 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                     state.radarCoverage == RadarCoverage.LOCAL &&
                     (state.selectedMinute < 0 || state.isPlaying)
                 ) {
-                    requestHistory(WeatherHistoryKind.RADAR)
+                    requestHistory(
+                        WeatherHistoryKind.RADAR,
+                        targetMinute = state.selectedMinute.takeUnless { state.isPlaying },
+                    )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -308,6 +318,10 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         requestedHistoryKind = historyKindNeededByCurrentUi() ?: requestedHistoryKind
         enrichmentJob = viewModelScope.launch {
             try {
+                // Location-specific forecasts answer the user's immediate question.
+                // Keep cloud/precipitation enrichment out of the network queue until
+                // those requests have completed.
+                areaForecastJob?.join()
                 source.enrichmentUpdates(base, target).collect { enriched ->
                     applySnapshot(enriched)
                     scheduleCacheWrite(snapshot ?: enriched)
@@ -350,8 +364,12 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         val previous = snapshot
         val loaded = incoming.preserveRegionalRadarFrom(previous)
         val targetPoint = _uiState.value.target.coordinate
-        val applicableAreaForecast = loaded.areaForecast?.takeIf { it.target == targetPoint }
-            ?: previous?.areaForecast?.takeIf { it.target == targetPoint }
+        val applicableAreaForecast = areaForecastForTarget(
+            target = targetPoint,
+            incoming = loaded.areaForecast,
+            previous = previous?.areaForecast,
+            visible = _uiState.value.areaForecast,
+        )
         val previousWind = previous?.takeIf { shouldPreserveWind(it, loaded) }
         val previousForecast = previous?.takeIf {
             loaded.rainForecast.isEmpty() && it.rainForecast.isNotEmpty()
@@ -429,6 +447,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 message = resolved.notice,
             )
         }
+        updateHistoryLoadingState()
         startRequestedHistoryIfReady()
     }
 
@@ -450,8 +469,10 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 currentWeatherUnavailableReason = null,
                 areaForecast = null,
                 areaForecastLoading = true,
+                areaForecastUnavailableReason = null,
                 weeklyForecast = null,
                 weeklyForecastLoading = true,
+                weeklyForecastUnavailableReason = null,
                 airQuality = null,
                 airQualityLoading = airQualitySource != null,
                 airQualityUnavailableReason = if (airQualitySource == null) "尚未設定 MOENV_API_KEY" else null,
@@ -475,7 +496,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 currentWeatherLoading = true,
                 currentWeatherUnavailableReason = null,
                 areaForecastLoading = true,
+                areaForecastUnavailableReason = null,
                 weeklyForecastLoading = true,
+                weeklyForecastUnavailableReason = null,
                 airQualityLoading = airQualitySource != null,
                 airQualityUnavailableReason = if (airQualitySource == null) "尚未設定 MOENV_API_KEY" else null,
             )
@@ -507,48 +530,124 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 )
             }
         }
-        areaForecastJob = viewModelScope.launch {
-            coroutineScope {
-                val shortRequest = async { catchingCancellable { source.loadAreaForecast(target) } }
-                val weeklyRequest = async { catchingCancellable { source.loadWeeklyForecast(target) } }
-                val airRequest = async {
-                    airQualitySource?.let { source -> catchingCancellable { source.loadNearest(target) } }
-                }
-                val shortResult = shortRequest.await()
-                val weeklyResult = weeklyRequest.await()
-                val airResult = airRequest.await()
-                if (_uiState.value.target.coordinate != target) return@coroutineScope
+        areaForecastJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                coroutineScope {
+                    // Start the short forecast immediately so it claims the first
+                    // available CWA request slot. Weekly forecast and AQI may follow.
+                    val shortRequest = async(start = CoroutineStart.UNDISPATCHED) {
+                        catchingCancellable { loadAreaForecastWithRetry(target) }
+                    }
+                    val weeklyRequest = async { catchingCancellable { source.loadWeeklyForecast(target) } }
+                    val airRequest = async {
+                        airQualitySource?.let { source -> catchingCancellable { source.loadNearest(target) } }
+                    }
+                    val shortResult = shortRequest.await()
+                    if (_uiState.value.target.coordinate != target) return@coroutineScope
 
-                val shortForecast = shortResult.getOrNull()
-                snapshot = snapshot?.copy(areaForecast = shortForecast)
-                _uiState.update { state ->
-                    state.copy(
-                        target = shortForecast?.let { forecast ->
-                            state.target.copy(displayName = forecast.displayName)
-                        } ?: state.target,
-                        areaForecast = shortForecast,
-                        areaForecastLoading = false,
-                        weeklyForecast = weeklyResult.getOrNull(),
-                        weeklyForecastLoading = false,
-                        airQuality = airResult?.getOrNull(),
-                        airQualityLoading = false,
-                        airQualityUnavailableReason = when {
-                            airQualitySource == null -> "尚未設定 MOENV_API_KEY"
-                            airResult?.isFailure == true -> {
-                                val error = airResult.exceptionOrNull()
-                                val detail = error?.message
-                                    ?.takeIf(String::isNotBlank)
-                                    ?: error?.javaClass?.simpleName
-                                    ?: "未知錯誤"
-                                "環境部 AQI 無法載入：$detail"
-                            }
-                            airResult?.getOrNull() == null -> "附近沒有可用的 AQI 測站"
-                            else -> null
-                        },
+                    val retainedShortForecast = _uiState.value.areaForecast
+                        ?.takeIf { it.target == target && shortResult.isFailure }
+                    val shortForecast = shortResult.getOrNull() ?: retainedShortForecast
+                    val shortFailureReason = forecastUnavailableReason(
+                        result = shortResult,
+                        emptyMessage = "此位置暫無近期鄉鎮預報",
+                        failurePrefix = "近期鄉鎮預報無法載入",
                     )
+                    snapshot = snapshot?.copy(areaForecast = shortForecast)
+                    _uiState.update { state ->
+                        state.copy(
+                            target = shortForecast?.let { forecast ->
+                                state.target.copy(displayName = forecast.displayName)
+                            } ?: state.target,
+                            areaForecast = shortForecast,
+                            areaForecastLoading = false,
+                            areaForecastUnavailableReason = shortFailureReason.takeIf { shortForecast == null },
+                            message = if (retainedShortForecast != null && shortFailureReason != null) {
+                                "$shortFailureReason · 保留上次預報"
+                            } else {
+                                state.message
+                            },
+                        )
+                    }
+
+                    val weeklyResult = weeklyRequest.await()
+                    val airResult = airRequest.await()
+                    if (_uiState.value.target.coordinate != target) return@coroutineScope
+                    val retainedWeeklyForecast = _uiState.value.weeklyForecast
+                        ?.takeIf { it.target == target && weeklyResult.isFailure }
+                    val weeklyForecast = weeklyResult.getOrNull() ?: retainedWeeklyForecast
+                    val weeklyFailureReason = forecastUnavailableReason(
+                        result = weeklyResult,
+                        emptyMessage = "此位置暫無一週鄉鎮預報",
+                        failurePrefix = "一週鄉鎮預報無法載入",
+                    )
+                    _uiState.update { state ->
+                        state.copy(
+                            weeklyForecast = weeklyForecast,
+                            weeklyForecastLoading = false,
+                            weeklyForecastUnavailableReason = weeklyFailureReason.takeIf { weeklyForecast == null },
+                            airQuality = airResult?.getOrNull(),
+                            airQualityLoading = false,
+                            airQualityUnavailableReason = when {
+                                airQualitySource == null -> "尚未設定 MOENV_API_KEY"
+                                airResult?.isFailure == true -> {
+                                    val error = airResult.exceptionOrNull()
+                                    val detail = error?.message
+                                        ?.takeIf(String::isNotBlank)
+                                        ?: error?.javaClass?.simpleName
+                                        ?: "未知錯誤"
+                                    "環境部 AQI 無法載入：$detail"
+                                }
+                                airResult?.getOrNull() == null -> "附近沒有可用的 AQI 測站"
+                                else -> null
+                            },
+                            message = if (retainedWeeklyForecast != null && weeklyFailureReason != null) {
+                                "$weeklyFailureReason · 保留上次預報"
+                            } else {
+                                state.message
+                            },
+                        )
+                    }
+                }
+            } finally {
+                if (areaForecastJob === coroutineContext[Job]) {
+                    areaForecastJob = null
+                    startRequestedHistoryIfReady()
                 }
             }
         }
+    }
+
+    private suspend fun loadAreaForecastWithRetry(target: GeoPoint): AreaForecast? {
+        var firstFailure: Throwable? = null
+        repeat(AREA_FORECAST_ATTEMPTS) { attempt ->
+            try {
+                return source.loadAreaForecast(target)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (firstFailure == null) firstFailure = error
+                if (attempt < AREA_FORECAST_ATTEMPTS - 1) delay(AREA_FORECAST_RETRY_DELAY_MILLIS)
+            }
+        }
+        val finalFailure = checkNotNull(firstFailure)
+        throw IllegalStateException(finalFailure.message ?: "近期鄉鎮預報載入失敗", finalFailure)
+    }
+
+    private fun forecastUnavailableReason(
+        result: Result<AreaForecast?>,
+        emptyMessage: String,
+        failurePrefix: String,
+    ): String? = when {
+        result.isFailure -> {
+            val error = result.exceptionOrNull()
+            val detail = error?.message?.takeIf(String::isNotBlank)
+                ?: error?.javaClass?.simpleName
+                ?: "未知錯誤"
+            "$failurePrefix：$detail"
+        }
+        result.getOrNull() == null -> emptyMessage
+        else -> null
     }
 
     private fun windTimestamp(value: WeatherSnapshot): Instant? =
@@ -594,8 +693,8 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         val primary = _uiState.value.layers.primary
         if (value < 0) {
             when (primary) {
-                PrimaryLayer.RADAR_RAIN -> requestHistory(WeatherHistoryKind.RADAR)
-                PrimaryLayer.CLOUD -> requestHistory(WeatherHistoryKind.CLOUD)
+                PrimaryLayer.RADAR_RAIN -> requestHistory(WeatherHistoryKind.RADAR, targetMinute = value)
+                PrimaryLayer.CLOUD -> requestHistory(WeatherHistoryKind.CLOUD, targetMinute = value)
                 PrimaryLayer.ONE_HOUR_RAIN -> Unit
             }
         }
@@ -650,11 +749,17 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     }
 
     fun setPrimaryLayer(layer: PrimaryLayer) {
+        if (_uiState.value.isPlaybackPending) {
+            playbackJob?.cancel()
+            playbackJob = null
+            _uiState.update { it.copy(isPlaybackPending = false) }
+        }
+        if (layer == PrimaryLayer.ONE_HOUR_RAIN) playbackJob?.cancel()
         val minute = _uiState.value.selectedMinute
         if (minute < 0) {
             when (layer) {
-                PrimaryLayer.RADAR_RAIN -> requestHistory(WeatherHistoryKind.RADAR)
-                PrimaryLayer.CLOUD -> requestHistory(WeatherHistoryKind.CLOUD)
+                PrimaryLayer.RADAR_RAIN -> requestHistory(WeatherHistoryKind.RADAR, targetMinute = minute)
+                PrimaryLayer.CLOUD -> requestHistory(WeatherHistoryKind.CLOUD, targetMinute = minute)
                 PrimaryLayer.ONE_HOUR_RAIN -> Unit
             }
         }
@@ -690,7 +795,10 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             previous.layers.primary == PrimaryLayer.RADAR_RAIN &&
             (previous.selectedMinute < 0 || previous.isPlaying)
         ) {
-            requestHistory(WeatherHistoryKind.RADAR)
+            requestHistory(
+                WeatherHistoryKind.RADAR,
+                targetMinute = previous.selectedMinute.takeUnless { previous.isPlaying },
+            )
         }
     }
 
@@ -749,6 +857,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         }
         if (snapshot?.let(::windTimestamp) != null) return
         windIdlePreloadJob = viewModelScope.launch {
+            areaForecastJob?.join()
             delay(WIND_IDLE_PRELOAD_DELAY_MILLIS)
             if (!_uiState.value.layers.windEnabled && snapshot?.let(::windTimestamp) == null) {
                 ensureWindLoaded(highPriority = false)
@@ -785,11 +894,101 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         }
     }
 
-    private fun requestHistory(kind: WeatherHistoryKind) {
+    private fun requestHistory(kind: WeatherHistoryKind, targetMinute: Int? = null) {
+        historyLoadFailure = null
+        historyLoadFailureKind = null
+        val requested = HistoryLoadingRequest(kind, targetMinute)
+        val existing = historyLoadingRequest
+        historyLoadingRequest = when {
+            existing?.kind == kind && existing.targetMinute == null -> existing
+            requested.targetMinute == null -> requested
+            else -> requested
+        }
+        if (isHistoryRequestReady(checkNotNull(historyLoadingRequest))) {
+            historyLoadingRequest = null
+            _uiState.update { it.copy(isHistoryLoading = false) }
+            return
+        }
+        _uiState.update { it.copy(isHistoryLoading = true) }
+        if (historyJob?.isActive == true && historyJobKind == kind) {
+            return
+        }
         requestedHistoryKind = kind
         if (kind == WeatherHistoryKind.RADAR) enrichmentJob?.cancel()
         startRequestedHistoryIfReady()
     }
+
+    private fun isHistoryFullyLoaded(kind: WeatherHistoryKind): Boolean {
+        val current = snapshot ?: return false
+        val frameCount = when (kind) {
+            WeatherHistoryKind.RADAR -> activeRadarHistoryFrames(current).size
+            WeatherHistoryKind.CLOUD -> activeCloudHistoryFrames(current).size
+        }
+        return hasCompleteHistoryForPlayback(kind, frameCount)
+    }
+
+    private fun isHistoryMinuteLoaded(kind: WeatherHistoryKind, minute: Int): Boolean {
+        val current = snapshot ?: return false
+        val frames = when (kind) {
+            WeatherHistoryKind.RADAR -> {
+                val currentRadar = if (_uiState.value.radarCoverage == RadarCoverage.LOCAL) {
+                    current.radarRegional ?: current.radar
+                } else {
+                    current.radar
+                }
+                activeRadarHistoryFrames(current) + currentRadar
+            }
+            WeatherHistoryKind.CLOUD -> activeCloudHistoryFrames(current)
+        }
+        val referenceAt = frames.maxOfOrNull(WeatherGrid::validAt) ?: return false
+        return isObservationMinuteAvailable(referenceAt, frames.map(WeatherGrid::validAt), minute)
+    }
+
+    private fun isHistoryRequestReady(request: HistoryLoadingRequest): Boolean =
+        request.targetMinute?.let { isHistoryMinuteLoaded(request.kind, it) }
+            ?: isHistoryFullyLoaded(request.kind)
+
+    private fun updateHistoryLoadingState() {
+        val request = historyLoadingRequest
+        if (request == null) {
+            _uiState.update { it.copy(isHistoryLoading = false) }
+            return
+        }
+        if (isHistoryRequestReady(request)) {
+            if (historyJob?.isActive != true && requestedHistoryKind == request.kind) {
+                requestedHistoryKind = null
+            }
+            historyLoadingRequest = null
+            _uiState.update { it.copy(isHistoryLoading = false) }
+            return
+        }
+        val requestStillActive =
+            (historyJob?.isActive == true && historyJobKind == request.kind) ||
+                requestedHistoryKind == request.kind
+        val requestFailed = historyLoadFailureKind == request.kind
+        if (!requestStillActive || requestFailed) {
+            historyLoadingRequest = null
+            _uiState.update { it.copy(isHistoryLoading = false) }
+        } else {
+            _uiState.update { it.copy(isHistoryLoading = true) }
+        }
+    }
+
+    private fun activeRadarHistoryFrames(current: WeatherSnapshot): List<WeatherGrid> =
+        if (_uiState.value.radarCoverage == RadarCoverage.LOCAL) {
+            current.radarRegionalFrames
+        } else {
+            current.radarFrames
+        }
+
+    private fun activeCloudHistoryFrames(current: WeatherSnapshot): List<WeatherGrid> =
+        if (_uiState.value.cloudCoverage == CloudCoverage.TAIWAN &&
+            current.cloudRegionalFrames.isNotEmpty()
+        ) {
+            current.cloudRegionalFrames
+        } else {
+            current.cloudFrames
+        }
 
     private fun historyKindNeededByCurrentUi(): WeatherHistoryKind? {
         val state = _uiState.value
@@ -804,6 +1003,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private fun startRequestedHistoryIfReady() {
         val kind = requestedHistoryKind ?: return
         if (historyJob?.isActive == true) return
+        if (areaForecastJob?.isActive == true) return
         val current = snapshot ?: return
         if (kind == WeatherHistoryKind.RADAR &&
             _uiState.value.radarCoverage == RadarCoverage.LOCAL &&
@@ -819,34 +1019,21 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             }
             if (current.cloudFrames.isEmpty() && current.cloudRegionalFrames.isEmpty()) return
         }
-        val alreadyLoaded = when (kind) {
-            WeatherHistoryKind.RADAR -> {
-                val frames = if (_uiState.value.radarCoverage == RadarCoverage.LOCAL) {
-                    current.radarRegionalFrames
-                } else {
-                    current.radarFrames
-                }
-                frames.size >= OBSERVATION_HISTORY_FRAME_COUNT - 1
-            }
-            WeatherHistoryKind.CLOUD -> {
-                val frames = if (current.cloudRegionalFrames.isNotEmpty()) {
-                    current.cloudRegionalFrames
-                } else {
-                    current.cloudFrames
-                }
-                frames.size >= OBSERVATION_HISTORY_FRAME_COUNT
-            }
-        }
-        if (alreadyLoaded) {
+        if (isHistoryFullyLoaded(kind)) {
             requestedHistoryKind = null
+            if (historyLoadingRequest?.kind == kind) historyLoadingRequest = null
+            _uiState.update { it.copy(isHistoryLoading = false) }
             return
         }
         if (kind == WeatherHistoryKind.CLOUD &&
             current.cloudFrames.isEmpty() && current.cloudRegionalFrames.isEmpty()
         ) return
         requestedHistoryKind = null
+        historyJobKind = kind
         historyJob = viewModelScope.launch {
             try {
+                historyLoadFailure = null
+                historyLoadFailureKind = null
                 source.historyUpdates(current, kind).collect { loaded ->
                     applySnapshot(loaded)
                     scheduleCacheWrite(snapshot ?: loaded)
@@ -854,14 +1041,37 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
+                historyLoadFailure = error
+                historyLoadFailureKind = kind
                 _uiState.update { it.copy(message = error.message ?: "歷史觀測載入失敗") }
             } finally {
                 if (historyJob === coroutineContext[Job]) {
                     historyJob = null
+                    historyJobKind = null
                     startRequestedHistoryIfReady()
+                    updateHistoryLoadingState()
                 }
             }
         }
+    }
+
+    private suspend fun awaitHistoryForPlayback(kind: WeatherHistoryKind): Boolean {
+        if (isHistoryFullyLoaded(kind)) return true
+        requestHistory(kind, targetMinute = null)
+        while (_uiState.value.isPlaybackPending) {
+            if (isHistoryFullyLoaded(kind)) {
+                updateHistoryLoadingState()
+                return true
+            }
+            startRequestedHistoryIfReady()
+            val sameKindActive = historyJob?.isActive == true && historyJobKind == kind
+            val sameKindQueued = requestedHistoryKind == kind
+            if (!sameKindActive && !sameKindQueued) return false
+            if (historyLoadFailureKind == kind) return false
+            if (snapshot == null && refreshJob?.isActive != true) return false
+            delay(HISTORY_WAIT_POLL_MILLIS)
+        }
+        return false
     }
 
     fun setOpacity(value: Float) = _uiState.update { it.copy(layers = it.layers.copy(opacity = value)) }
@@ -888,25 +1098,101 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         it.copy(themePreference = next)
     }
 
+    /** Called only after the map's back buffer has finished blending into view. */
+    fun onWeatherFramePresented(grid: WeatherGrid) {
+        presentedWeatherFrame.value = grid.presentationKey()
+    }
+
+    private suspend fun awaitActiveWeatherFramePresented(): Boolean {
+        val expected = _uiState.value.activeGrid?.presentationKey() ?: return false
+        if (presentedWeatherFrame.value == expected) return true
+        return withTimeoutOrNull(WEATHER_FRAME_PRESENT_TIMEOUT_MILLIS) {
+            presentedWeatherFrame.first { it == expected }
+            true
+        } ?: false
+    }
+
     fun togglePlayback() {
-        val start = !_uiState.value.isPlaying
-        _uiState.update { it.copy(isPlaying = start) }
-        if (start) viewModelScope.launch {
-            when (_uiState.value.layers.primary) {
-                PrimaryLayer.RADAR_RAIN -> requestHistory(WeatherHistoryKind.RADAR)
-                PrimaryLayer.CLOUD -> requestHistory(WeatherHistoryKind.CLOUD)
-                PrimaryLayer.ONE_HOUR_RAIN -> Unit
+        val current = _uiState.value
+        if (current.isPlaying || current.isPlaybackPending) {
+            playbackJob?.cancel()
+            playbackJob = null
+            _uiState.update {
+                it.copy(
+                    isPlaying = false,
+                    isPlaybackPending = false,
+                )
+            }
+            return
+        }
+        _uiState.update { it.copy(isPlaybackPending = true) }
+        playbackJob?.cancel()
+        playbackJob = viewModelScope.launch {
+            val historyKind = when (_uiState.value.layers.primary) {
+                PrimaryLayer.RADAR_RAIN -> WeatherHistoryKind.RADAR
+                PrimaryLayer.CLOUD -> WeatherHistoryKind.CLOUD
+                PrimaryLayer.ONE_HOUR_RAIN -> null
+            }
+            if (historyKind == null) {
+                _uiState.update { it.copy(isPlaybackPending = false) }
+                return@launch
+            }
+            val historyReady = awaitHistoryForPlayback(historyKind)
+            if (!_uiState.value.isPlaybackPending) return@launch
+            if (!historyReady) {
+                _uiState.update {
+                    it.copy(
+                        isPlaying = false,
+                        isPlaybackPending = false,
+                        message = it.message ?: "歷史觀測資料不足，暫時無法播放",
+                    )
+                }
+                return@launch
             }
             // Playback is observation-only: move chronologically from history to now.
             if (_uiState.value.selectedMinute >= 0) setMinute(-OBSERVATION_HISTORY_MINUTES)
+            if (!awaitActiveWeatherFramePresented()) {
+                _uiState.update {
+                    it.copy(
+                        isPlaying = false,
+                        isPlaybackPending = false,
+                        message = "天氣圖層準備逾時，請稍後再試",
+                    )
+                }
+                return@launch
+            }
+            _uiState.update {
+                it.copy(
+                    isPlaybackPending = false,
+                    isPlaying = true,
+                )
+            }
+            var nextFrameAt = SystemClock.elapsedRealtime() + PLAYBACK_FRAME_DURATION_MILLIS
             while (_uiState.value.isPlaying) {
-                delay(800)
-                val next = _uiState.value.selectedMinute + OBSERVATION_FRAME_INTERVAL_MINUTES
-                if (next >= TIMELINE_END_MINUTE) {
-                    setMinute(TIMELINE_END_MINUTE)
+                val remainingBeforeFrame = nextFrameAt - SystemClock.elapsedRealtime()
+                if (remainingBeforeFrame > 0L) delay(remainingBeforeFrame)
+                if (!_uiState.value.isPlaying) break
+                val nextMinute = nextObservationFrameMinute(_uiState.value.selectedMinute)
+                val transitionStartedAt = SystemClock.elapsedRealtime()
+                setMinute(nextMinute)
+                if (!awaitActiveWeatherFramePresented()) {
+                    _uiState.update {
+                        it.copy(
+                            isPlaying = false,
+                            isPlaybackPending = false,
+                            message = "天氣圖層準備逾時，播放已停止",
+                        )
+                    }
+                    break
+                }
+                nextFrameAt = transitionStartedAt + PLAYBACK_FRAME_DURATION_MILLIS
+                if (nextMinute >= TIMELINE_END_MINUTE) {
+                    // Animation and frame timing share one deadline. Only hold for
+                    // the part of the one-second cadence that remains after rendering.
+                    val remainingFinalFrame = nextFrameAt - SystemClock.elapsedRealtime()
+                    if (remainingFinalFrame > 0L) delay(remainingFinalFrame)
                     _uiState.update { it.copy(isPlaying = false) }
-                } else {
-                    setMinute(next)
+                    break
                 }
             }
         }
@@ -918,11 +1204,77 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         const val PANEL_ANCHOR_STATE_KEY = "panelAnchor"
         const val WIND_ENABLED_STATE_KEY = "windEnabled"
         const val TIMELINE_END_MINUTE = 0
+        const val PLAYBACK_FRAME_DURATION_MILLIS = 1_000L
+        const val WEATHER_FRAME_PRESENT_TIMEOUT_MILLIS = 15_000L
+        const val HISTORY_WAIT_POLL_MILLIS = 50L
         const val CURRENT_WEATHER_TIMEOUT_MILLIS = 10_000L
         const val CRITICAL_LOAD_TIMEOUT_MILLIS = 15_000L
+        const val AREA_FORECAST_ATTEMPTS = 2
+        const val AREA_FORECAST_RETRY_DELAY_MILLIS = 400L
         const val CACHE_WRITE_DEBOUNCE_MILLIS = 1_000L
         const val WIND_IDLE_PRELOAD_DELAY_MILLIS = 5_000L
         const val AUTO_REFRESH_MILLIS = 10 * 60 * 1_000L
     }
 
 }
+
+private data class WeatherFramePresentationKey(
+    val width: Int,
+    val height: Int,
+    val unit: WeatherUnit,
+    val bounds: GeoBounds,
+    val validAt: Instant,
+    val sourceId: String,
+)
+
+private fun WeatherGrid.presentationKey() = WeatherFramePresentationKey(
+    width = width,
+    height = height,
+    unit = unit,
+    bounds = bounds,
+    validAt = validAt,
+    sourceId = sourceId,
+)
+
+/**
+ * A location forecast can finish before the first radar snapshot exists. In that
+ * startup race it lives only in [HomeUiState], so later snapshot updates must keep
+ * the already-visible result for the same target instead of replacing it with null.
+ */
+internal fun areaForecastForTarget(
+    target: GeoPoint,
+    incoming: AreaForecast?,
+    previous: AreaForecast?,
+    visible: AreaForecast?,
+): AreaForecast? = sequenceOf(incoming, previous, visible)
+    .filterNotNull()
+    .firstOrNull { it.target == target }
+
+internal fun nextObservationFrameMinute(minute: Int): Int =
+    ((Math.floorDiv(minute, OBSERVATION_FRAME_INTERVAL_MINUTES) + 1) *
+        OBSERVATION_FRAME_INTERVAL_MINUTES).coerceAtMost(0)
+
+internal fun hasCompleteHistoryForPlayback(kind: WeatherHistoryKind, frameCount: Int): Boolean =
+    when (kind) {
+        WeatherHistoryKind.RADAR -> frameCount >= OBSERVATION_HISTORY_FRAME_COUNT - 1
+        WeatherHistoryKind.CLOUD -> frameCount >= OBSERVATION_HISTORY_FRAME_COUNT
+    }
+
+internal fun isObservationMinuteAvailable(
+    referenceAt: Instant,
+    frameTimes: List<Instant>,
+    minute: Int,
+): Boolean {
+    val targetAt = referenceAt.plusSeconds(minute * 60L)
+    return frameTimes.any {
+        kotlin.math.abs(java.time.Duration.between(it, targetAt).seconds) <=
+            OBSERVATION_TARGET_TOLERANCE_SECONDS
+    }
+}
+
+private data class HistoryLoadingRequest(
+    val kind: WeatherHistoryKind,
+    val targetMinute: Int?,
+)
+
+private const val OBSERVATION_TARGET_TOLERANCE_SECONDS = 60L

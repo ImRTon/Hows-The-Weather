@@ -1,4 +1,5 @@
 @file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class,
     com.google.maps.android.compose.MapsComposeExperimentalApi::class,
 )
@@ -14,10 +15,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.MarqueeSpacing
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
@@ -71,8 +79,10 @@ import com.rton.howstheweather.render.WeatherTileProvider
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -120,10 +130,7 @@ private fun WeatherNavigationBar(
     destination: AppDestination,
     onSelect: (AppDestination) -> Unit,
 ) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        tonalElevation = 3.dp,
-    ) {
+    NavigationBar {
         listOf(
             Triple(AppDestination.NOW, Icons.Default.NearMe, "即時"),
             Triple(AppDestination.FORECAST, Icons.Default.CalendarMonth, "預報"),
@@ -135,11 +142,6 @@ private fun WeatherNavigationBar(
                 icon = { Icon(icon, contentDescription = null) },
                 label = { Text(label) },
                 alwaysShowLabel = true,
-                colors = NavigationBarItemDefaults.colors(
-                    indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
-                    selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    selectedTextColor = MaterialTheme.colorScheme.onSurface,
-                ),
             )
         }
     }
@@ -210,11 +212,17 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
                 IconButton(onClick = viewModel::cycleTheme) { Icon(Icons.Default.Contrast, "切換亮暗主題") }
             }
             Box(Modifier.fillMaxWidth().height(2.dp)) {
-                if (state.isUpdating) {
+                if (state.isUpdating || state.isHistoryLoading) {
                     LinearProgressIndicator(
                         modifier = Modifier
                             .fillMaxSize()
-                            .semantics { contentDescription = "正在背景更新天氣與風場資料" },
+                            .semantics {
+                                contentDescription = if (state.isHistoryLoading) {
+                                    "正在載入歷史觀測資料"
+                                } else {
+                                    "正在背景更新天氣與風場資料"
+                                }
+                            },
                         color = MaterialTheme.colorScheme.primary.copy(alpha = .72f),
                         trackColor = Color.Transparent,
                     )
@@ -322,9 +330,14 @@ private fun ResizableWeatherPanels(
 
 @Composable
 private fun PanelHandle(onClick: () -> Unit, visualHeight: Dp, modifier: Modifier = Modifier) {
+    val interactionSource = remember { MutableInteractionSource() }
     Box(
         modifier = modifier
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            )
             .semantics {
                 role = Role.Button
                 contentDescription = "上下拖曳調整決策卡與地圖大小"
@@ -340,7 +353,11 @@ private fun PanelHandle(onClick: () -> Unit, visualHeight: Dp, modifier: Modifie
                 Box(
                     Modifier.size(width = 32.dp, height = 3.dp)
                         .clip(RoundedCornerShape(99.dp))
-                        .background(MaterialTheme.colorScheme.outline.copy(alpha = .75f)),
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = .75f))
+                        .indication(
+                            interactionSource = interactionSource,
+                            indication = ripple(color = MaterialTheme.colorScheme.primary),
+                        ),
                 )
             }
         }
@@ -378,11 +395,18 @@ private fun DecisionPanel(state: HomeUiState, modifier: Modifier = Modifier) {
             ) {
                 Text(
                     state.decision.headline,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            repeatDelayMillis = 0,
+                            initialDelayMillis = 0,
+                            spacing = MarqueeSpacing.fractionOfContainer(0.08f),
+                        ),
                     style = if (collapsed) MaterialTheme.typography.titleMedium else MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    overflow = TextOverflow.Clip,
                 )
                 if (collapsed) {
                     Spacer(Modifier.width(12.dp))
@@ -691,7 +715,16 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
     }
     val renderTheme = if (darkMap) RenderTheme.DARK else RenderTheme.LIGHT
     val grid = state.activeGrid
-    val tileProvider = remember(grid, renderTheme) {
+    // Keep the Maps SDK attribution above our bottom control bar. The SDK
+    // uses this inset to place the Google logo and legal notices where they
+    // remain visible instead of underneath TimelineControls/OneHourRainControls.
+    val mapBottomContentPadding = when {
+        state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN && state.legendExpanded -> 104.dp
+        else -> 72.dp
+    }
+    val firstTileOverlayState = rememberTileOverlayState()
+    val secondTileOverlayState = rememberTileOverlayState()
+    val tileProviders = remember(grid?.unit, renderTheme) {
         grid?.let {
             val style = when (it.unit) {
                 WeatherUnit.DBZ -> WeatherRenderStyle.radar(renderTheme, 1f)
@@ -700,8 +733,72 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
                 WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(renderTheme, 1f)
                 WeatherUnit.LUMINANCE -> WeatherRenderStyle.cloud(renderTheme, 1f)
             }
-            WeatherTileProvider(it, style)
+            arrayOf(
+                WeatherTileProvider(it, style),
+                WeatherTileProvider(it, style),
+            )
         }
+    }
+    var frontTileSlot by remember(grid?.unit, renderTheme) { mutableIntStateOf(0) }
+    var displayedGrid by remember(grid?.unit, renderTheme) { mutableStateOf(grid) }
+    var displayedMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
+    var timelineFromMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
+    var timelineToMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
+    val tileBlend = remember(grid?.unit, renderTheme) { Animatable(0f) }
+    LaunchedEffect(mapLoaded, grid, tileProviders) {
+        // TileOverlayState is attached only after TileOverlay enters the map
+        // composition. Clearing it before that point throws and crashes the
+        // app when weather data arrives before Maps finishes loading.
+        if (!mapLoaded) return@LaunchedEffect
+        val providers = tileProviders ?: return@LaunchedEffect
+        val targetGrid = grid ?: return@LaunchedEffect
+        if (displayedGrid === targetGrid) {
+            displayedMinute = state.selectedMinute
+            timelineFromMinute = state.selectedMinute
+            timelineToMinute = state.selectedMinute
+            viewModel.onWeatherFramePresented(targetGrid)
+            return@LaunchedEffect
+        }
+
+        val backTileSlot = 1 - frontTileSlot
+        val frontProvider = providers[frontTileSlot]
+        val backProvider = providers[backTileSlot]
+        // Pre-render through the visible provider because it knows the current
+        // viewport. The cache is shared, so the hidden provider can consume the
+        // prepared PNGs immediately without clearing the visible overlay.
+        withContext(Dispatchers.Default) { frontProvider.preloadGrid(targetGrid) }
+        backProvider.updateGrid(targetGrid)
+        if (backTileSlot == 0) firstTileOverlayState.clearTileCache()
+        else secondTileOverlayState.clearTileCache()
+        delay(TILE_BACK_BUFFER_SETTLE_MILLIS)
+
+        tileBlend.snapTo(0f)
+        if (state.isPlaying && displayedGrid?.unit == targetGrid.unit) {
+            timelineFromMinute = displayedMinute
+            timelineToMinute = state.selectedMinute
+            tileBlend.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(
+                    durationMillis = TILE_BLEND_DURATION_MILLIS,
+                    easing = LinearEasing,
+                ),
+            )
+        } else {
+            tileBlend.snapTo(1f)
+        }
+        frontTileSlot = backTileSlot
+        displayedGrid = targetGrid
+        displayedMinute = state.selectedMinute
+        timelineFromMinute = state.selectedMinute
+        timelineToMinute = state.selectedMinute
+        tileBlend.snapTo(0f)
+        viewModel.onWeatherFramePresented(targetGrid)
+    }
+    val tileWeights = tileBlendWeights(frontTileSlot, tileBlend.value)
+    val timelineMinute = if (state.isPlaying) {
+        timelineFromMinute + (timelineToMinute - timelineFromMinute) * tileBlend.value
+    } else {
+        state.selectedMinute.toFloat()
     }
 
     Box(modifier) {
@@ -716,6 +813,7 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
                 }
             },
             properties = MapProperties(mapStyleOptions = fallbackStyle),
+            contentPadding = PaddingValues(bottom = mapBottomContentPadding),
             uiSettings = MapUiSettings(
                 zoomControlsEnabled = false,
                 mapToolbarEnabled = false,
@@ -746,11 +844,19 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
                     )
                 }
             }
-            if (mapLoaded && tileProvider != null) {
+            if (mapLoaded && tileProviders != null) {
                 TileOverlay(
-                    tileProvider = tileProvider,
-                    transparency = 1f - state.layers.opacity,
-                    fadeIn = true,
+                    tileProvider = tileProviders[0],
+                    state = firstTileOverlayState,
+                    transparency = 1f - state.layers.opacity * tileWeights.first,
+                    fadeIn = false,
+                    zIndex = 2f,
+                )
+                TileOverlay(
+                    tileProvider = tileProviders[1],
+                    state = secondTileOverlayState,
+                    transparency = 1f - state.layers.opacity * tileWeights.second,
+                    fadeIn = false,
                     zIndex = 2f,
                 )
             }
@@ -779,7 +885,12 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
         if (state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN) {
             OneHourRainControls(state, Modifier.align(Alignment.BottomCenter))
         } else {
-            TimelineControls(state, viewModel, Modifier.align(Alignment.BottomCenter))
+            TimelineControls(
+                state = state,
+                viewModel = viewModel,
+                timelineMinute = timelineMinute,
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
         }
         FloatingActionButton(
             onClick = locateOrRequestPermission,
@@ -870,6 +981,17 @@ internal fun requestBestLocation(
 private const val LOCATION_CACHE_MAX_AGE_MILLIS = 2 * 60 * 1_000L
 private const val LOCATION_FALLBACK_MAX_AGE_MILLIS = 30 * 60 * 1_000L
 private const val LOCATION_REQUEST_TIMEOUT_MILLIS = 5_000L
+private const val TILE_BACK_BUFFER_SETTLE_MILLIS = 32L
+private const val TILE_BLEND_DURATION_MILLIS = 650
+
+internal data class TileBlendWeights(val first: Float, val second: Float)
+
+internal fun tileBlendWeights(frontSlot: Int, progress: Float): TileBlendWeights {
+    require(frontSlot == 0 || frontSlot == 1)
+    val blend = progress.coerceIn(0f, 1f)
+    val first = if (frontSlot == 0) 1f - blend else blend
+    return TileBlendWeights(first = first, second = 1f - first)
+}
 
 @Composable
 private fun WindLegend(provenance: WindProvenance, darkMap: Boolean, modifier: Modifier = Modifier) {
@@ -977,7 +1099,12 @@ private fun OneHourRainControls(state: HomeUiState, modifier: Modifier = Modifie
 }
 
 @Composable
-private fun TimelineControls(state: HomeUiState, viewModel: HomeViewModel, modifier: Modifier = Modifier) {
+private fun TimelineControls(
+    state: HomeUiState,
+    viewModel: HomeViewModel,
+    timelineMinute: Float,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         shape = RoundedCornerShape(14.dp),
@@ -993,7 +1120,17 @@ private fun TimelineControls(state: HomeUiState, viewModel: HomeViewModel, modif
                     onClick = viewModel::togglePlayback,
                     modifier = Modifier.size(48.dp),
                 ) {
-                    Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (state.isPlaying) "暫停" else "播放")
+                    if (state.isPlaybackPending) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Icon(
+                            if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            if (state.isPlaying) "暫停" else "播放",
+                        )
+                    }
                 }
                 Column(Modifier.width(68.dp)) {
                     Text(
@@ -1011,7 +1148,7 @@ private fun TimelineControls(state: HomeUiState, viewModel: HomeViewModel, modif
                     )
                 }
                 Slider(
-                    value = state.selectedMinute.toFloat(),
+                    value = timelineMinute,
                     onValueChange = {
                         viewModel.setMinute(
                             (it / OBSERVATION_FRAME_INTERVAL_MINUTES).roundToInt() *

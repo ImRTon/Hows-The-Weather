@@ -9,34 +9,75 @@ import com.google.android.gms.maps.model.TileProvider
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.WeatherGrid
 import java.io.ByteArrayOutputStream
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.PI
 import kotlin.math.atan
 import kotlin.math.pow
 
 class WeatherTileProvider(
-    private val grid: WeatherGrid,
+    initialGrid: WeatherGrid,
     private val style: WeatherRenderStyle,
 ) : TileProvider {
+    @Volatile
+    private var grid: WeatherGrid = initialGrid
+    private val recentTilesLock = Any()
+    private val recentTiles = LinkedHashMap<TileCoordinate, Unit>(
+        MAX_RECENT_TILES,
+        .75f,
+        true,
+    )
+
+    fun updateGrid(grid: WeatherGrid) {
+        require(grid.unit == style.unit) { "A tile provider cannot switch weather units" }
+        this.grid = grid
+    }
+
+    /** Pre-renders current viewport tiles before the Maps SDK cache is invalidated. */
+    fun preloadGrid(grid: WeatherGrid) {
+        require(grid.unit == style.unit) { "A tile provider cannot switch weather units" }
+        val tiles = synchronized(recentTilesLock) { recentTiles.keys.toList() }
+        tiles.forEach { tile ->
+            if (intersectsGrid(grid, tile.x, tile.y, tile.zoom)) {
+                tileBytes(grid, tile.x, tile.y, tile.zoom)
+            }
+        }
+    }
+
     override fun getTile(x: Int, y: Int, zoom: Int): Tile {
-        if (!intersectsGrid(x, y, zoom)) return TileProvider.NO_TILE
-        val key = cacheKey(x, y, zoom)
-        tileCache.get(key)?.let { return Tile(TILE_SIZE, TILE_SIZE, it) }
+        val frameGrid = grid
+        if (!intersectsGrid(frameGrid, x, y, zoom)) return TileProvider.NO_TILE
+        rememberTile(TileCoordinate(x, y, zoom))
+        return Tile(TILE_SIZE, TILE_SIZE, tileBytes(frameGrid, x, y, zoom))
+    }
+
+    private fun tileBytes(grid: WeatherGrid, x: Int, y: Int, zoom: Int): ByteArray {
+        val key = cacheKey(grid, x, y, zoom)
+        tileCache.get(key)?.let { return it }
         val candidateLock = Any()
         val lock = renderLocks.putIfAbsent(key, candidateLock) ?: candidateLock
         return try {
             synchronized(lock) {
-                tileCache.get(key)?.let { return@synchronized Tile(TILE_SIZE, TILE_SIZE, it) }
-                val bytes = renderTile(x, y, zoom)
+                tileCache.get(key)?.let { return@synchronized it }
+                val bytes = renderTile(grid, x, y, zoom)
                 tileCache.put(key, bytes)
-                Tile(TILE_SIZE, TILE_SIZE, bytes)
+                bytes
             }
         } finally {
             renderLocks.remove(key, lock)
         }
     }
 
-    private fun renderTile(x: Int, y: Int, zoom: Int): ByteArray {
+    private fun rememberTile(tile: TileCoordinate) = synchronized(recentTilesLock) {
+        recentTiles[tile] = Unit
+        while (recentTiles.size > MAX_RECENT_TILES) {
+            val iterator = recentTiles.entries.iterator()
+            iterator.next()
+            iterator.remove()
+        }
+    }
+
+    private fun renderTile(grid: WeatherGrid, x: Int, y: Int, zoom: Int): ByteArray {
         val renderSize = TILE_SIZE
         val bitmap = Bitmap.createBitmap(renderSize, renderSize, Bitmap.Config.ARGB_8888)
         val values = if (style.contours.isNotEmpty()) {
@@ -108,7 +149,7 @@ class WeatherTileProvider(
         first.isFinite() && second.isFinite() &&
             ((first < threshold && second >= threshold) || (first >= threshold && second < threshold))
 
-    private fun intersectsGrid(tileX: Int, tileY: Int, zoom: Int): Boolean {
+    private fun intersectsGrid(grid: WeatherGrid, tileX: Int, tileY: Int, zoom: Int): Boolean {
         val northWest = tilePixelToGeo(tileX, tileY, zoom, 0, 0)
         val southEast = tilePixelToGeo(tileX, tileY, zoom, TILE_SIZE, TILE_SIZE)
         if (southEast.latitude > grid.bounds.north || northWest.latitude < grid.bounds.south) return false
@@ -118,7 +159,7 @@ class WeatherTileProvider(
         return directIntersection || wrappedIntersection
     }
 
-    private fun cacheKey(x: Int, y: Int, zoom: Int): String = buildString(96) {
+    private fun cacheKey(grid: WeatherGrid, x: Int, y: Int, zoom: Int): String = buildString(96) {
         append(RENDERER_VERSION).append('|')
         append(grid.sourceId).append('|').append(grid.validAt.epochSecond)
         append('|').append(grid.width).append('x').append(grid.height)
@@ -142,9 +183,12 @@ class WeatherTileProvider(
         private const val CONTOUR_GUTTER = 1
         private const val RENDERER_VERSION = 2
         private const val CACHE_BYTES = 24 * 1024 * 1024
+        private const val MAX_RECENT_TILES = 16
         private val renderLocks = ConcurrentHashMap<String, Any>()
         private val tileCache = object : LruCache<String, ByteArray>(CACHE_BYTES) {
             override fun sizeOf(key: String, value: ByteArray): Int = value.size
         }
     }
+
+    private data class TileCoordinate(val x: Int, val y: Int, val zoom: Int)
 }

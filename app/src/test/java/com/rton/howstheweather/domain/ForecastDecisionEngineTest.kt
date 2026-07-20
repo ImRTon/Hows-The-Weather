@@ -56,7 +56,7 @@ class ForecastDecisionEngineTest {
         val result = engine.evaluateHourlyAccumulation(-99f, issuedAt, issuedAt)
 
         assertEquals(RainState.UNAVAILABLE, result.state)
-        assertEquals("應該不會下雨", result.headline)
+        assertEquals("未來一小時應該不會下雨", result.headline)
         assertEquals("未取得有效的未來一小時累積降雨資料", result.detail)
         assertEquals(listOf(ForecastPoint(60, null)), result.series)
         assertNull(result.eventWindow)

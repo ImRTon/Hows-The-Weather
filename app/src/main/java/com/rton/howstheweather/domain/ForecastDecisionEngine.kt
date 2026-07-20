@@ -124,7 +124,7 @@ class ForecastDecisionEngine {
 
     private fun unavailableHourly(issuedAt: Instant) = ForecastDecision(
         state = RainState.UNAVAILABLE,
-        headline = "應該不會下雨",
+        headline = "未來一小時應該不會下雨",
         detail = "未取得有效的未來一小時累積降雨資料",
         eventWindow = null,
         series = listOf(ForecastPoint(60, null)),

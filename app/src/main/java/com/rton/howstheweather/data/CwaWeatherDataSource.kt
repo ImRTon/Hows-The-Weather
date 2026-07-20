@@ -60,6 +60,9 @@ class CwaWeatherDataSource(
     private val historyLoadSemaphore = Semaphore(HISTORY_DOWNLOAD_CONCURRENCY)
     private val quantitativeLoadSemaphore = Semaphore(QUANTITATIVE_DOWNLOAD_CONCURRENCY)
     private val animationCacheMutex = Mutex()
+    private val countyForecastLocationsMutex = Mutex()
+    @Volatile
+    private var countyForecastLocations: List<CwaForecastLocation>? = null
 
     init { require(apiKey.isNotBlank()) }
 
@@ -122,9 +125,7 @@ class CwaWeatherDataSource(
         fetchRadarFrame(LOCAL_RADAR_DATASET_ID, RADAR_LOCAL_SAMPLE_SIZE)
 
     override suspend fun loadAreaForecast(target: GeoPoint): AreaForecast? = coroutineScope {
-        val counties = countyForecastLocations ?: withContext(Dispatchers.IO) {
-            areaForecastParser.locations(fetchForecastJson(NATIONAL_THREE_DAY_FORECAST_ID))
-        }.also { countyForecastLocations = it }
+        val counties = forecastCountyLocations()
         val candidates = counties
             .mapNotNull { county ->
                 COUNTY_THREE_DAY_DATASET_IDS[county.name]?.let { datasetId -> Triple(county, datasetId, areaForecastParser.distanceKm(target, county.coordinate)) }
@@ -134,7 +135,7 @@ class CwaWeatherDataSource(
             .filter { it.third <= MAX_COUNTY_DISTANCE_KM }
         if (candidates.isEmpty()) return@coroutineScope null
 
-        candidates.map { (county, datasetId) ->
+        val results = candidates.map { (county, datasetId) ->
             async(Dispatchers.IO) {
                 catchingCancellable {
                     areaForecastParser.nearestForecast(
@@ -143,17 +144,19 @@ class CwaWeatherDataSource(
                         sourceId = datasetId,
                         countyName = county.name,
                     )
-                }.getOrNull()
+                }
             }
-        }.awaitAll().filterNotNull().minByOrNull {
-            areaForecastParser.distanceKm(target, it.areaCoordinate)
-        }
+        }.awaitAll()
+        resolveAreaForecastResults(
+            results = results,
+            target = target,
+            parser = areaForecastParser,
+            failureMessage = "CWA 近期鄉鎮預報載入失敗",
+        )
     }
 
     override suspend fun loadWeeklyForecast(target: GeoPoint): AreaForecast? = coroutineScope {
-        val counties = countyForecastLocations ?: withContext(Dispatchers.IO) {
-            areaForecastParser.locations(fetchForecastJson(NATIONAL_THREE_DAY_FORECAST_ID))
-        }.also { countyForecastLocations = it }
+        val counties = forecastCountyLocations()
         val candidates = counties
             .mapNotNull { county ->
                 COUNTY_ONE_WEEK_DATASET_IDS[county.name]?.let { datasetId ->
@@ -165,7 +168,7 @@ class CwaWeatherDataSource(
             .filter { it.third <= MAX_COUNTY_DISTANCE_KM }
         if (candidates.isEmpty()) return@coroutineScope null
 
-        candidates.map { (county, datasetId) ->
+        val results = candidates.map { (county, datasetId) ->
             async(Dispatchers.IO) {
                 catchingCancellable {
                     areaForecastParser.nearestWeeklyForecast(
@@ -174,10 +177,23 @@ class CwaWeatherDataSource(
                         sourceId = datasetId,
                         countyName = county.name,
                     )
-                }.getOrNull()
+                }
             }
-        }.awaitAll().filterNotNull().minByOrNull {
-            areaForecastParser.distanceKm(target, it.areaCoordinate)
+        }.awaitAll()
+        resolveAreaForecastResults(
+            results = results,
+            target = target,
+            parser = areaForecastParser,
+            failureMessage = "CWA 一週鄉鎮預報載入失敗",
+        )
+    }
+
+    private suspend fun forecastCountyLocations(): List<CwaForecastLocation> {
+        countyForecastLocations?.let { return it }
+        return countyForecastLocationsMutex.withLock {
+            countyForecastLocations ?: withContext(Dispatchers.IO) {
+                areaForecastParser.locations(fetchForecastJson(NATIONAL_THREE_DAY_FORECAST_ID))
+            }.also { countyForecastLocations = it }
         }
     }
 
@@ -324,6 +340,10 @@ class CwaWeatherDataSource(
         channelFlow {
             when (kind) {
                 WeatherHistoryKind.RADAR -> {
+                    val timeline = ObservedWeatherTimeline()
+                    val updatesMutex = Mutex()
+                    var wideFrames = snapshot.radarFrames
+                    var localFrames = snapshot.radarRegionalFrames
                     val wideRequest = async {
                         catchingCancellable {
                             fetchRadarHistory(
@@ -331,7 +351,13 @@ class CwaWeatherDataSource(
                                 WIDE_RADAR_DATASET_ID,
                                 WIDE_RADAR_FILE_PREFIX,
                                 RADAR_WIDE_SAMPLE_SIZE,
-                            )
+                            ) { frame ->
+                                updatesMutex.withLock {
+                                    wideFrames = timeline.merge(snapshot.radar, wideFrames + frame)
+                                        .filter { it.validAt < snapshot.radar.validAt }
+                                    send(snapshot.copy(radarFrames = wideFrames, radarRegionalFrames = localFrames))
+                                }
+                            }
                         }
                     }
                     val localRequest = async {
@@ -342,7 +368,13 @@ class CwaWeatherDataSource(
                                     LOCAL_RADAR_DATASET_ID,
                                     LOCAL_RADAR_FILE_PREFIX,
                                     RADAR_LOCAL_SAMPLE_SIZE,
-                                )
+                                ) { frame ->
+                                    updatesMutex.withLock {
+                                        localFrames = timeline.merge(regional, localFrames + frame)
+                                            .filter { it.validAt < regional.validAt }
+                                        send(snapshot.copy(radarFrames = wideFrames, radarRegionalFrames = localFrames))
+                                    }
+                                }
                             }
                         } ?: Result.success(emptyList())
                     }
@@ -371,6 +403,25 @@ class CwaWeatherDataSource(
                         send(snapshot)
                         return@channelFlow
                     }
+                    val timeline = ObservedWeatherTimeline()
+                    val updatesMutex = Mutex()
+                    var taiwanFrames = snapshot.cloudRegionalFrames
+                    var eastAsiaFrames = snapshot.cloudFrames
+                    suspend fun publishCloudUpdate() {
+                        val harmonizedTaiwan = if (taiwanFrames.isNotEmpty() && eastAsiaFrames.isNotEmpty()) {
+                            withContext(PREPROCESSING_DISPATCHER) {
+                                cloudGridHarmonizer.harmonize(taiwanFrames, eastAsiaFrames)
+                            }
+                        } else {
+                            taiwanFrames
+                        }
+                        send(
+                            snapshot.copy(
+                                cloudFrames = eastAsiaFrames,
+                                cloudRegionalFrames = harmonizedTaiwan,
+                            ),
+                        )
+                    }
                     val taiwanRequest = async {
                         taiwanCurrent?.let {
                             catchingCancellable {
@@ -379,7 +430,12 @@ class CwaWeatherDataSource(
                                     TAIWAN_CLOUD_DATASET_ID,
                                     TAIWAN_CLOUD_FILE_PREFIX,
                                     CLOUD_LOCAL_MAX_DIMENSION,
-                                )
+                                ) { frame ->
+                                    updatesMutex.withLock {
+                                        taiwanFrames = timeline.merge(it, taiwanFrames + frame)
+                                        publishCloudUpdate()
+                                    }
+                                }
                             }
                         }
                     }
@@ -391,15 +447,20 @@ class CwaWeatherDataSource(
                                     EAST_ASIA_CLOUD_DATASET_ID,
                                     EAST_ASIA_CLOUD_FILE_PREFIX,
                                     CLOUD_EAST_ASIA_MAX_DIMENSION,
-                                )
+                                ) { frame ->
+                                    updatesMutex.withLock {
+                                        eastAsiaFrames = timeline.merge(it, eastAsiaFrames + frame)
+                                        publishCloudUpdate()
+                                    }
+                                }
                             }
                         }
                     }
                     val taiwanResult = taiwanRequest.await()
                     val eastAsiaResult = eastAsiaRequest.await()
-                    val eastAsiaFrames = eastAsiaResult?.getOrElse { snapshot.cloudFrames }
+                    eastAsiaFrames = eastAsiaResult?.getOrElse { snapshot.cloudFrames }
                         ?: snapshot.cloudFrames
-                    val taiwanFrames = taiwanResult?.getOrElse { snapshot.cloudRegionalFrames }
+                    taiwanFrames = taiwanResult?.getOrElse { snapshot.cloudRegionalFrames }
                         ?: snapshot.cloudRegionalFrames
                     val harmonizedTaiwan = if (taiwanFrames.isNotEmpty() && eastAsiaFrames.isNotEmpty()) {
                         withContext(PREPROCESSING_DISPATCHER) {
@@ -516,6 +577,7 @@ class CwaWeatherDataSource(
         datasetId: String,
         animationFilePrefix: String,
         sampleSize: Int,
+        onFrame: suspend (WeatherGrid) -> Unit,
     ): List<WeatherGrid> = coroutineScope {
         val currentMetadata = CwaRadarImageMetadata(current.bounds, current.validAt, productUrl = "")
         val records = withContext(Dispatchers.IO) {
@@ -530,11 +592,15 @@ class CwaWeatherDataSource(
         records.map { record ->
             async {
                 historyLoadSemaphore.withPermit {
-                    catchingCancellable {
+                    val frame = catchingCancellable {
                         val metadata = radarMetadataForHistory(record, currentMetadata)
                         decodeRadarImage(metadata, datasetId, sampleSize)
                     }
                         .getOrNull()
+                        ?.takeIf(WeatherGrid::isObservedFrame)
+                        ?.takeIf { it.validAt < current.validAt }
+                    frame?.let { onFrame(it) }
+                    frame
                 }
             }
         }.awaitAll().filterNotNull()
@@ -560,6 +626,7 @@ class CwaWeatherDataSource(
         datasetId: String,
         animationFilePrefix: String,
         maxGridDimension: Int,
+        onFrame: suspend (WeatherGrid) -> Unit,
     ): List<WeatherGrid> = coroutineScope {
         val currentMetadata = CwaSatelliteImageMetadata(current.bounds, current.validAt, productUrl = "")
         val records = withContext(Dispatchers.IO) {
@@ -574,11 +641,15 @@ class CwaWeatherDataSource(
         val historical = records.map { record ->
             async {
                 historyLoadSemaphore.withPermit {
-                    catchingCancellable {
+                    val frame = catchingCancellable {
                         val metadata = satelliteMetadataForHistory(record, currentMetadata)
                         decodeSatelliteImage(metadata, datasetId, maxGridDimension)
                     }
                         .getOrNull()
+                        ?.takeIf(WeatherGrid::isObservedFrame)
+                        ?.takeIf { it.validAt < current.validAt }
+                    frame?.let { onFrame(it) }
+                    frame
                 }
             }
         }.awaitAll().filterNotNull()
@@ -905,7 +976,6 @@ class CwaWeatherDataSource(
         }
         val TAIPEI_ZONE: ZoneId = ZoneId.of("Asia/Taipei")
         val animationScriptCache = ConcurrentHashMap<String, String>()
-        @Volatile var countyForecastLocations: List<CwaForecastLocation>? = null
         val PREPROCESSING_DISPATCHER = Dispatchers.Default.limitedParallelism(2)
     }
 }
@@ -928,4 +998,23 @@ private suspend fun <T> catchingCancellable(block: suspend () -> T): Result<T> =
     throw cancelled
 } catch (error: Throwable) {
     Result.failure(error)
+}
+
+internal fun resolveAreaForecastResults(
+    results: List<Result<AreaForecast?>>,
+    target: GeoPoint,
+    parser: CwaAreaForecastParser,
+    failureMessage: String,
+): AreaForecast? {
+    results.mapNotNull { it.getOrNull() }.minByOrNull {
+        parser.distanceKm(target, it.areaCoordinate)
+    }?.let { return it }
+
+    val failures = results.mapNotNull { it.exceptionOrNull() }
+    if (results.isNotEmpty() && failures.size == results.size) {
+        val primary = failures.first()
+        failures.drop(1).filter { it !== primary }.forEach(primary::addSuppressed)
+        throw IllegalStateException(failureMessage, primary)
+    }
+    return null
 }

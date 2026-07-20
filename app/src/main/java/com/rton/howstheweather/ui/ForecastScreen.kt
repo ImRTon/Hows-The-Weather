@@ -69,14 +69,18 @@ fun ForecastScreen(state: HomeUiState, modifier: Modifier = Modifier) {
         ForecastSectionTitle(title = "逐時預報")
         when {
             state.areaForecastLoading -> LoadingForecastCard("正在取得近期預報")
-            state.areaForecast == null -> EmptyForecastCard("此位置暫無近期鄉鎮預報")
+            state.areaForecast == null -> EmptyForecastCard(
+                state.areaForecastUnavailableReason ?: "此位置暫無近期鄉鎮預報",
+            )
             else -> HourlyForecastTimeline(state.areaForecast.periods, zone)
         }
 
         ForecastSectionTitle(title = "本週預報")
         when {
             state.weeklyForecastLoading -> LoadingForecastCard("正在取得本週預報")
-            state.weeklyForecast == null -> EmptyForecastCard("此位置暫無一週鄉鎮預報")
+            state.weeklyForecast == null -> EmptyForecastCard(
+                state.weeklyForecastUnavailableReason ?: "此位置暫無一週鄉鎮預報",
+            )
             else -> WeeklyForecastTimeline(state.weeklyForecast.periods, zone)
         }
 
@@ -268,14 +272,18 @@ private fun WeeklyForecastTop(periods: List<AreaForecastPeriod>, zone: ZoneId, m
 @Composable
 private fun WeeklyForecastWeather(period: AreaForecastPeriod?, daytime: Boolean, modifier: Modifier = Modifier) {
     val description = period?.weatherDescription?.ifBlank { "天氣未定" } ?: "尚無時段"
-    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+    ) {
         Icon(
             if (period == null) Icons.Default.Info else forecastIcon(description, daytime),
             contentDescription = description,
             modifier = Modifier.size(24.dp),
             tint = forecastIconColor(description),
         )
-        Text(description, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text(description, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
