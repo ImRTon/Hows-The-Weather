@@ -1,5 +1,5 @@
 # Copy to local.properties. Never commit real keys.
 MAPS_API_KEY=
-MAP_ID=DEMO_MAP_ID
+MAP_ID=
 CWA_API_KEY=
 MOENV_API_KEY=
