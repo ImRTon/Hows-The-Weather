@@ -715,12 +715,14 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
     }
     val renderTheme = if (darkMap) RenderTheme.DARK else RenderTheme.LIGHT
     val grid = state.activeGrid
-    // Keep the Maps SDK attribution above our bottom control bar. The SDK
-    // uses this inset to place the Google logo and legal notices where they
-    // remain visible instead of underneath TimelineControls/OneHourRainControls.
+    // Keep the Maps SDK attribution clear of our bottom controls and legend.
+    // The Android Maps SDK fixes the logo to the start edge and only exposes
+    // padding for moving its built-in attribution away from overlapping UI.
     val mapBottomContentPadding = when {
-        state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN && state.legendExpanded -> 104.dp
-        else -> 72.dp
+        state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN && state.legendExpanded -> 108.dp
+        state.legendExpanded -> 96.dp
+        state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> 72.dp
+        else -> 68.dp
     }
     val firstTileOverlayState = rememberTileOverlayState()
     val secondTileOverlayState = rememberTileOverlayState()
@@ -908,7 +910,12 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
         AnimatedVisibility(
             visible = state.layers.primary == PrimaryLayer.RADAR_RAIN &&
                 state.radarCoverage == RadarCoverage.LOCAL && cameraState.position.zoom >= 11f,
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 94.dp),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(
+                    start = 12.dp,
+                    bottom = if (state.legendExpanded) 132.dp else 94.dp,
+                ),
         ) {
             Text(
                 "雷達原始格點約 1.25 km",

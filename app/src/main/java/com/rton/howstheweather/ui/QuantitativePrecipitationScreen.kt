@@ -14,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -164,6 +165,9 @@ fun QuantitativePrecipitationScreen(
             MapStyleOptions.loadRawResourceStyle(context, if (darkMap) R.raw.map_style_dark else R.raw.map_style_light)
         } else null
     }
+    // Reserve the area occupied by the bottom forecast timeline so the Maps
+    // SDK keeps its Google logo and legal notices fully visible above it.
+    val mapBottomContentPadding = 120.dp
 
     Box(modifier) {
         GoogleMap(
@@ -173,6 +177,7 @@ fun QuantitativePrecipitationScreen(
                 GoogleMapOptions().apply { if (!usesBundledMapStyle) mapId(configuredMapId) }
             },
             properties = MapProperties(mapStyleOptions = fallbackStyle),
+            contentPadding = PaddingValues(bottom = mapBottomContentPadding),
             uiSettings = MapUiSettings(
                 zoomControlsEnabled = false,
                 mapToolbarEnabled = false,
@@ -242,7 +247,7 @@ fun QuantitativePrecipitationScreen(
         }
         AnimatedVisibility(
             visible = grid != null && cameraState.position.zoom >= 11f,
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 138.dp),
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 164.dp),
         ) {
             Text(
                 "原始格點約 ${grid?.resolutionKm?.let { "%.2f".format(it) } ?: "—"} km",
