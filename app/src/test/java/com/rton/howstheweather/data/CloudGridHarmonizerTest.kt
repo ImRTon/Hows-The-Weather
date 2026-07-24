@@ -22,10 +22,12 @@ class CloudGridHarmonizerTest {
         )
         val global = grid("global") { it }
         val local = grid("local") { 0.2f + it * 0.6f }
+        local.values[0] = 0f
 
         val result = CloudGridHarmonizer().harmonize(local, global)
 
         assertEquals(bounds, result.bounds)
+        assertEquals(0f, result.valueAt(0, 0), 0f)
         assertEquals(global.valueAt(8, 8), result.valueAt(8, 8), 0.02f)
     }
 }

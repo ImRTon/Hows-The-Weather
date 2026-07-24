@@ -42,6 +42,22 @@ class ForecastDecisionEngineTest {
     @Test fun `missing target grid returns unavailable`() {
         val result = engine.evaluate(listOf(ForecastPoint(0, null)), issuedAt, issuedAt)
         assertEquals(RainState.UNAVAILABLE, result.state)
+        assertEquals("暫時無法判斷未來一小時雨勢", result.headline)
+    }
+
+    @Test fun `loading state leads with the one hour forecast priority`() {
+        val result = engine.loadingHourly(issuedAt)
+
+        assertEquals(RainState.UNAVAILABLE, result.state)
+        assertEquals("正在取得未來一小時降雨預報", result.headline)
+        assertEquals(false, result.isStale)
+    }
+
+    @Test fun `valid dry hourly accumulation reports no rain`() {
+        val result = engine.evaluateHourlyAccumulation(0f, issuedAt, issuedAt)
+
+        assertEquals(RainState.DRY, result.state)
+        assertEquals("未來一小時應該不會下雨", result.headline)
     }
 
     @Test fun `official hourly accumulation does not invent minute event window`() {
@@ -52,11 +68,11 @@ class ForecastDecisionEngineTest {
         assertEquals("預報時間範圍：現在至 +60 分鐘", result.detail)
     }
 
-    @Test fun `invalid hourly sentinel uses requested fallback copy without becoming dry data`() {
+    @Test fun `invalid hourly sentinel stays unavailable instead of reporting no rain`() {
         val result = engine.evaluateHourlyAccumulation(-99f, issuedAt, issuedAt)
 
         assertEquals(RainState.UNAVAILABLE, result.state)
-        assertEquals("未來一小時應該不會下雨", result.headline)
+        assertEquals("暫時無法判斷未來一小時雨勢", result.headline)
         assertEquals("未取得有效的未來一小時累積降雨資料", result.detail)
         assertEquals(listOf(ForecastPoint(60, null)), result.series)
         assertNull(result.eventWindow)

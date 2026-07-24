@@ -37,7 +37,7 @@ data class WeatherRenderStyle(
         if (unit == WeatherUnit.LUMINANCE) {
             val index = (normalized * 255f).toInt().coerceIn(0, 255)
             val source = colorLut[index]
-            val alpha = ((0.18f + normalized * 0.82f) * opacity * 255f).toInt().coerceIn(0, 255)
+            val alpha = (cloudOpacity(normalized, opacity) * 255f).toInt().coerceIn(0, 255)
             return Color.argb(alpha, Color.red(source), Color.green(source), Color.blue(source))
         }
         val index = (normalized * 255f).toInt().coerceIn(0, 255)
@@ -134,6 +134,13 @@ data class WeatherRenderStyle(
             )
         }
     }
+}
+
+internal fun cloudOpacity(normalized: Float, opacity: Float): Float {
+    val threshold = 0.08f
+    val strength = ((normalized - threshold) / (1f - threshold)).coerceIn(0f, 1f)
+    val smooth = strength * strength * (3f - 2f * strength)
+    return smooth * opacity.coerceIn(0f, 1f)
 }
 
 object PerceptualColorLut {

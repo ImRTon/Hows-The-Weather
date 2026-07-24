@@ -41,6 +41,22 @@ internal fun WeatherSnapshot.preserveRegionalRadarFrom(previous: WeatherSnapshot
     return if (radarRegional == null) copy(radarRegional = previousRegional) else this
 }
 
+/**
+ * Supplemental layer flows are based on a snapshot captured before their
+ * downloads begin. A newer decision forecast can complete while cloud or
+ * history frames are still loading, so those flows must not write their stale
+ * forecast fields back over the latest decision.
+ */
+internal fun WeatherSnapshot.preserveDecisionForecastFrom(previous: WeatherSnapshot?): WeatherSnapshot {
+    val currentDecision = previous?.takeIf { it.rainForecast.isNotEmpty() } ?: return this
+    return copy(
+        rainForecast = currentDecision.rainForecast,
+        forecastAtTarget = currentDecision.forecastAtTarget,
+        issuedAt = currentDecision.issuedAt,
+        hourlyAccumulationAtTarget = currentDecision.hourlyAccumulationAtTarget,
+    )
+}
+
 data class WeatherWindData(
     val windGrid: WindGrid? = null,
     val winds: List<WindObservation> = emptyList(),

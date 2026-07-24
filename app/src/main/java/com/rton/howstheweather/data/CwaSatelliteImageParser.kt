@@ -1,5 +1,6 @@
 package com.rton.howstheweather.data
 
+import android.graphics.BitmapFactory
 import android.content.res.Resources
 import com.rton.howstheweather.R
 import com.rton.howstheweather.domain.GeoBounds
@@ -24,8 +25,9 @@ data class CwaSatelliteImageMetadata(
 /** Parses CWA satellite metadata and turns the neutral IR image into cloud opacity data. */
 class CwaSatelliteImageParser private constructor(
     private val precomputedEastAsiaProjection: PrecomputedProjection?,
+    private val cloudImageCleaners: Map<String, CloudImageCleaner>,
 ) {
-    constructor() : this(null)
+    constructor() : this(null, emptyMap())
 
     fun parseMetadata(json: String): CwaSatelliteImageMetadata {
         val dataset = JSONObject(json).getJSONObject("cwaopendata").getJSONObject("dataset")
@@ -69,20 +71,40 @@ class CwaSatelliteImageParser private constructor(
         val gridWidth = if (scale <= 1.0) width else (width / scale).toInt().coerceAtLeast(2)
         val gridHeight = if (scale <= 1.0) height else (height / scale).toInt().coerceAtLeast(2)
         val values = FloatArray(gridWidth * gridHeight) { Float.NaN }
-        val luminancePixels = IntArray(argbPixels.size) { luminance(argbPixels[it]) }
-        val neighborhoodSamples = IntArray(25)
         val projectedPixels = projectionIndices(metadata, width, height, gridWidth, gridHeight)
+        val cleanedCloudPixels = cleanerFor(sourceId)?.cleanSampledArgb(
+            sourceWidth = width,
+            sourceHeight = height,
+            argbPixels = argbPixels,
+            outputWidth = gridWidth,
+            outputHeight = gridHeight,
+            sourceIndices = projectedPixels,
+        )
+        val luminancePixels = if (cleanedCloudPixels == null) {
+            IntArray(argbPixels.size) { luminance(argbPixels[it]) }
+        } else {
+            null
+        }
+        val neighborhoodSamples = if (cleanedCloudPixels == null) IntArray(25) else null
         for (y in 0 until gridHeight) {
             checkCancelled()
             for (x in 0 until gridWidth) {
-                val sourceIndex = projectedPixels[y * gridWidth + x]
+                val outputIndex = y * gridWidth + x
+                val sourceIndex = projectedPixels[outputIndex]
                 if (sourceIndex < 0) continue
-                val sourceX = sourceIndex % width
-                val sourceY = sourceIndex / width
-                val luminance = lowerQuartileLuminance(
-                    luminancePixels, width, height, sourceX, sourceY, neighborhoodSamples,
-                )
-                values[y * gridWidth + x] = luminance.takeIf { it >= MIN_VISIBLE_LUMINANCE } ?: 0f
+                values[outputIndex] = cleanedCloudPixels?.get(outputIndex) ?: run {
+                    val sourceX = sourceIndex % width
+                    val sourceY = sourceIndex / width
+                    val luminance = lowerQuartileLuminance(
+                        requireNotNull(luminancePixels),
+                        width,
+                        height,
+                        sourceX,
+                        sourceY,
+                        requireNotNull(neighborhoodSamples),
+                    )
+                    luminance.takeIf { it >= MIN_VISIBLE_LUMINANCE } ?: 0f
+                }
             }
         }
         val midLatitude = (metadata.bounds.south + metadata.bounds.north) / 2.0
@@ -151,19 +173,46 @@ class CwaSatelliteImageParser private constructor(
         val gridWidth = if (scale <= 1.0) width else (width / scale).roundToInt().coerceAtLeast(2)
         val gridHeight = if (scale <= 1.0) height else (height / scale).roundToInt().coerceAtLeast(2)
         val values = FloatArray(gridWidth * gridHeight)
-        val luminancePixels = IntArray(argbPixels.size) { luminance(argbPixels[it]) }
-        val neighborhoodSamples = IntArray(25)
+        val directPixels = IntArray(gridWidth * gridHeight) { index ->
+            val x = index % gridWidth
+            val y = index / gridWidth
+            val sourceX = (x.toDouble() / (gridWidth - 1) * (width - 1)).roundToInt()
+            val sourceY = (y.toDouble() / (gridHeight - 1) * (height - 1)).roundToInt()
+            sourceY * width + sourceX
+        }
+        val cleanedCloudPixels = cleanerFor(sourceId)?.cleanSampledArgb(
+            sourceWidth = width,
+            sourceHeight = height,
+            argbPixels = argbPixels,
+            outputWidth = gridWidth,
+            outputHeight = gridHeight,
+            sourceIndices = directPixels,
+        )
+        val luminancePixels = if (cleanedCloudPixels == null) {
+            IntArray(argbPixels.size) { luminance(argbPixels[it]) }
+        } else {
+            null
+        }
+        val neighborhoodSamples = if (cleanedCloudPixels == null) IntArray(25) else null
         for (y in 0 until gridHeight) {
             checkCancelled()
-            val sourceY = (y.toDouble() / (gridHeight - 1) * (height - 1)).roundToInt()
             for (x in 0 until gridWidth) {
-                val sourceX = (x.toDouble() / (gridWidth - 1) * (width - 1)).roundToInt()
-                // The source includes thick white coordinate/coast lines. A lower neighborhood
-                // percentile removes narrow annotations while retaining broad cloud structures.
-                val luminance = lowerQuartileLuminance(
-                    luminancePixels, width, height, sourceX, sourceY, neighborhoodSamples,
-                )
-                values[y * gridWidth + x] = luminance.takeIf { it >= MIN_VISIBLE_LUMINANCE } ?: 0f
+                val outputIndex = y * gridWidth + x
+                val sourceIndex = directPixels[outputIndex]
+                values[outputIndex] = cleanedCloudPixels?.get(outputIndex) ?: run {
+                    val sourceX = sourceIndex % width
+                    val sourceY = sourceIndex / width
+                    // Fallback for parser-only tests and installations without bundled templates.
+                    val luminance = lowerQuartileLuminance(
+                        requireNotNull(luminancePixels),
+                        width,
+                        height,
+                        sourceX,
+                        sourceY,
+                        requireNotNull(neighborhoodSamples),
+                    )
+                    luminance.takeIf { it >= MIN_VISIBLE_LUMINANCE } ?: 0f
+                }
             }
         }
         val midLatitude = (metadata.bounds.south + metadata.bounds.north) / 2.0
@@ -227,6 +276,10 @@ class CwaSatelliteImageParser private constructor(
         return selectKth(samples, LOWER_QUARTILE_INDEX) / 255f
     }
 
+    private fun cleanerFor(sourceId: String): CloudImageCleaner? = cloudImageCleaners.entries
+        .firstOrNull { sourceId.startsWith(it.key) }
+        ?.value
+
     internal fun selectKth(values: IntArray, k: Int): Int {
         require(k in values.indices)
         var left = 0
@@ -273,7 +326,41 @@ class CwaSatelliteImageParser private constructor(
         fun withBundledEastAsiaProjection(resources: Resources): CwaSatelliteImageParser =
             CwaSatelliteImageParser(
                 runCatching { readBundledEastAsiaProjection(resources) }.getOrNull(),
+                mapOf(
+                    TAIWAN_DATASET_ID to CloudImageCleaner(
+                        readBundledCloudBackground(resources, R.raw.cloud_background_taiwan),
+                    ),
+                    EAST_ASIA_DATASET_ID to CloudImageCleaner(
+                        readBundledCloudBackground(resources, R.raw.cloud_background_east_asia),
+                    ),
+                ),
             )
+
+        private fun readBundledCloudBackground(
+            resources: Resources,
+            resourceId: Int,
+        ): CloudBackgroundTemplate {
+            val bitmap = resources.openRawResource(resourceId).use { input ->
+                BitmapFactory.decodeStream(input) ?: error("衛星固定背景解碼失敗")
+            }
+            return try {
+                val pixels = IntArray(bitmap.width * bitmap.height)
+                bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                CloudBackgroundTemplate(
+                    width = bitmap.width,
+                    height = bitmap.height,
+                    luminance = FloatArray(pixels.size) { index ->
+                        val color = pixels[index]
+                        val red = color ushr 16 and 0xff
+                        val green = color ushr 8 and 0xff
+                        val blue = color and 0xff
+                        (red * 0.2126f + green * 0.7152f + blue * 0.0722f) / 255f
+                    },
+                )
+            } finally {
+                bitmap.recycle()
+            }
+        }
 
         private fun readBundledEastAsiaProjection(resources: Resources): PrecomputedProjection =
             DataInputStream(

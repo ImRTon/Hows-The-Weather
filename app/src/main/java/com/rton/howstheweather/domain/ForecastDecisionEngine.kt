@@ -4,6 +4,16 @@ import java.time.Duration
 import java.time.Instant
 
 class ForecastDecisionEngine {
+    fun loadingHourly(issuedAt: Instant): ForecastDecision = ForecastDecision(
+        state = RainState.UNAVAILABLE,
+        headline = "正在取得未來一小時降雨預報",
+        detail = "正在載入目前天氣與官方一小時累積降雨資料",
+        eventWindow = null,
+        series = listOf(ForecastPoint(60, null)),
+        issuedAt = issuedAt,
+        isStale = false,
+    )
+
     fun evaluateHourlyAccumulation(
         millimeters: Float?,
         issuedAt: Instant,
@@ -15,7 +25,7 @@ class ForecastDecisionEngine {
         val state = classify(millimeters)
         val stale = Duration.between(issuedAt, now).toMinutes() > 30
         val headline = if (state == RainState.DRY) {
-            "未來一小時暫無明顯降雨"
+            "未來一小時應該不會下雨"
         } else {
             "未來一小時${label(state)}，預估累積 ${formatMillimeters(millimeters)} mm"
         }
@@ -55,7 +65,7 @@ class ForecastDecisionEngine {
         }
         val headline = when {
             currentState == RainState.DRY && window != null -> "約 ${window.first}–${window.last} 分鐘後開始下雨"
-            currentState == RainState.DRY -> "未來一小時暫無明顯降雨"
+            currentState == RainState.DRY -> "未來一小時應該不會下雨"
             window != null -> "目前${label(currentState)}，預計 ${window.first}–${window.last} 分鐘後轉小"
             else -> "目前${label(currentState)}，一小時內可能持續"
         }
@@ -114,7 +124,7 @@ class ForecastDecisionEngine {
 
     private fun unavailable(series: List<ForecastPoint>, issuedAt: Instant) = ForecastDecision(
         state = RainState.UNAVAILABLE,
-        headline = "暫時無法判斷雨勢",
+        headline = "暫時無法判斷未來一小時雨勢",
         detail = "找不到目標位置的有效數值格點",
         eventWindow = null,
         series = series,
@@ -124,7 +134,7 @@ class ForecastDecisionEngine {
 
     private fun unavailableHourly(issuedAt: Instant) = ForecastDecision(
         state = RainState.UNAVAILABLE,
-        headline = "未來一小時應該不會下雨",
+        headline = "暫時無法判斷未來一小時雨勢",
         detail = "未取得有效的未來一小時累積降雨資料",
         eventWindow = null,
         series = listOf(ForecastPoint(60, null)),

@@ -104,6 +104,33 @@ class WindParticleOverlayTest {
     }
 
     @Test
+    fun `moving camera reprojects settled particles without rebuilding their layout`() {
+        val reference = WindParticleCamera(GeoPoint(0.0, 0.0), zoom = 10f)
+        val onePhysicalPixelEast = GeoPoint(
+            latitude = 0.0,
+            longitude = 360.0 / (256.0 * 3.0 * 1024.0),
+        )
+
+        val pan = windParticleCameraTransform(
+            reference = reference,
+            current = WindParticleCamera(onePhysicalPixelEast, zoom = 10f),
+            density = 3f,
+        )
+        val zoom = windParticleCameraTransform(
+            reference = reference,
+            current = WindParticleCamera(reference.center, zoom = 11f),
+            density = 3f,
+        )
+
+        assertEquals(-1f, pan.translation.x, .001f)
+        assertEquals(0f, pan.translation.y, .001f)
+        assertEquals(1f, pan.scale, 0f)
+        assertEquals(2f, zoom.scale, 0f)
+        assertEquals(0f, zoom.translation.x, 0f)
+        assertEquals(0f, zoom.translation.y, 0f)
+    }
+
+    @Test
     fun `wind particle fades in only at the start of its life`() {
         assertEquals(0f, windParticleAlpha(0f), 0f)
         assertEquals(1f, windParticleAlpha(.5f), 0f)

@@ -23,6 +23,7 @@ import com.rton.howstheweather.data.OBSERVATION_FRAME_INTERVAL_MINUTES
 import com.rton.howstheweather.data.OBSERVATION_HISTORY_FRAME_COUNT
 import com.rton.howstheweather.data.OBSERVATION_HISTORY_MINUTES
 import com.rton.howstheweather.data.isObservedFrame
+import com.rton.howstheweather.data.preserveDecisionForecastFrom
 import com.rton.howstheweather.data.preserveRegionalRadarFrom
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -95,7 +96,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private var requestedHistoryKind: WeatherHistoryKind? = null
     private val presentedWeatherFrame = MutableStateFlow<WeatherFramePresentationKey?>(null)
     private val initialTarget = TargetLocation(GeoPoint(25.0478, 121.5319), "臺北市中心", false)
-    private val emptyDecision = decisionEngine.evaluate(listOf(ForecastPoint(0, null)), Instant.now())
+    private val emptyDecision = decisionEngine.loadingHourly(Instant.now())
     private val _uiState = MutableStateFlow(
         HomeUiState(
             target = initialTarget,
@@ -233,7 +234,12 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                     )
                     scheduleWindPreload()
                 } else {
-                    _uiState.update { it.copy(message = error.message ?: "資料載入失敗") }
+                    _uiState.update {
+                        it.copy(
+                            decision = decisionEngine.evaluateHourlyAccumulation(null, Instant.now()),
+                            message = error.message ?: "資料載入失敗",
+                        )
+                    }
                 }
             } finally {
                 if (sequence == refreshSequence) {
@@ -323,8 +329,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 // those requests have completed.
                 areaForecastJob?.join()
                 source.enrichmentUpdates(base, target).collect { enriched ->
-                    applySnapshot(enriched)
-                    scheduleCacheWrite(snapshot ?: enriched)
+                    val supplemental = enriched.preserveDecisionForecastFrom(snapshot)
+                    applySnapshot(supplemental)
+                    scheduleCacheWrite(snapshot ?: supplemental)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1035,8 +1042,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 historyLoadFailure = null
                 historyLoadFailureKind = null
                 source.historyUpdates(current, kind).collect { loaded ->
-                    applySnapshot(loaded)
-                    scheduleCacheWrite(snapshot ?: loaded)
+                    val supplemental = loaded.preserveDecisionForecastFrom(snapshot)
+                    applySnapshot(supplemental)
+                    scheduleCacheWrite(snapshot ?: supplemental)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

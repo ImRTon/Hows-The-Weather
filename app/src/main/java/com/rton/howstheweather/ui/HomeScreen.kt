@@ -874,6 +874,7 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
                 winds = state.winds,
                 mapCenter = GeoPoint(position.target.latitude, position.target.longitude),
                 mapZoom = position.zoom,
+                cameraMoving = cameraState.isMoving,
                 darkMap = darkMap,
                 modifier = Modifier.fillMaxSize(),
             )

@@ -39,6 +39,7 @@ internal fun WindParticleOverlay(
     winds: List<WindObservation>,
     mapCenter: GeoPoint,
     mapZoom: Float,
+    cameraMoving: Boolean,
     darkMap: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -52,15 +53,23 @@ internal fun WindParticleOverlay(
             delay(WIND_FRAME_INTERVAL_MILLIS)
         }
     }
-    val observations = remember(winds, mapCenter) {
-        selectRelevantWinds(winds, mapCenter, MAX_RENDER_OBSERVATIONS).map(::asVector)
+    var layoutCamera by remember {
+        mutableStateOf(WindParticleCamera(center = mapCenter, zoom = mapZoom))
     }
-    val particles = remember(windGrid, observations, mapCenter, mapZoom, canvasSize, density, darkMap) {
+    LaunchedEffect(cameraMoving, mapCenter, mapZoom) {
+        if (!cameraMoving) {
+            layoutCamera = WindParticleCamera(center = mapCenter, zoom = mapZoom)
+        }
+    }
+    val observations = remember(winds, layoutCamera.center) {
+        selectRelevantWinds(winds, layoutCamera.center, MAX_RENDER_OBSERVATIONS).map(::asVector)
+    }
+    val particles = remember(windGrid, observations, layoutCamera, canvasSize, density, darkMap) {
         buildWindParticles(
             windGrid = windGrid,
             observations = observations,
-            mapCenter = mapCenter,
-            mapZoom = mapZoom,
+            mapCenter = layoutCamera.center,
+            mapZoom = layoutCamera.zoom,
             width = canvasSize.width.toFloat(),
             height = canvasSize.height.toFloat(),
             density = density,
@@ -73,16 +82,26 @@ internal fun WindParticleOverlay(
         },
     ) {
         val timeSeconds = frameNanos / 1_000_000_000.0
+        val cameraTransform = windParticleCameraTransform(
+            reference = layoutCamera,
+            current = WindParticleCamera(mapCenter, mapZoom),
+            density = density,
+        )
+        val canvasCenter = Offset(size.width / 2f, size.height / 2f)
         clipRect(0f, 0f, size.width, size.height) {
             particles.forEach { particle ->
                 val phase = (
                     (timeSeconds * (.22 + particle.speed * .035) + pseudoRandom(particle.seed + 4096)) % 1.0
                     ).toFloat()
-                val head = particle.base + particle.direction * (particle.travelDistance * phase)
+                val base = canvasCenter +
+                    (particle.base - canvasCenter) * cameraTransform.scale +
+                    cameraTransform.translation
+                val head = base +
+                    particle.direction * (particle.travelDistance * phase * cameraTransform.scale)
                 drawComet(
                     head = head,
                     direction = particle.direction,
-                    length = particle.length,
+                    length = particle.length * cameraTransform.scale,
                     color = particle.color,
                     alpha = windParticleAlpha(phase) * particle.layoutAlpha,
                     scale = windParticleScale(phase),
@@ -91,6 +110,45 @@ internal fun WindParticleOverlay(
             }
         }
     }
+}
+
+internal data class WindParticleCamera(
+    val center: GeoPoint,
+    val zoom: Float,
+)
+
+internal data class WindParticleCameraTransform(
+    val scale: Float,
+    val translation: Offset,
+)
+
+/**
+ * Reprojects the settled particle layout while the Maps camera is moving.
+ *
+ * This keeps existing seeds and animation phases alive during a gesture. Sampling and lattice
+ * construction happen once after the camera settles instead of on every Maps camera callback.
+ */
+internal fun windParticleCameraTransform(
+    reference: WindParticleCamera,
+    current: WindParticleCamera,
+    density: Float,
+): WindParticleCameraTransform {
+    val referenceWorldSize = worldSizePixels(reference.zoom, density)
+    var longitudeDelta = current.center.longitude - reference.center.longitude
+    if (longitudeDelta > 180.0) longitudeDelta -= 360.0
+    if (longitudeDelta < -180.0) longitudeDelta += 360.0
+    val centerDeltaX = longitudeDelta / 360.0 * referenceWorldSize
+    val centerDeltaY = (
+        mercatorY(current.center.latitude) - mercatorY(reference.center.latitude)
+        ) * referenceWorldSize
+    val scale = 2.0.pow((current.zoom - reference.zoom).toDouble()).toFloat()
+    return WindParticleCameraTransform(
+        scale = scale,
+        translation = Offset(
+            x = (-centerDeltaX * scale).toFloat(),
+            y = (-centerDeltaY * scale).toFloat(),
+        ),
+    )
 }
 
 private data class RenderWindParticle(

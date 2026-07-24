@@ -935,7 +935,7 @@ class CwaWeatherDataSource(
         const val SATELLITE_ANIMATION_BASE_URL = "https://www.cwa.gov.tw/Data/satellite"
         const val WIDE_RADAR_FILE_PREFIX = "CV1_3600_"
         const val LOCAL_RADAR_FILE_PREFIX = "CV1_TW_3600_"
-        const val EAST_ASIA_CLOUD_FILE_PREFIX = "FDK_IR1_Gray_1000-"
+        const val EAST_ASIA_CLOUD_FILE_PREFIX = "LCC_IR1_Gray_1000-"
         const val TAIWAN_CLOUD_FILE_PREFIX = "TWI_IR1_Gray_800-"
         const val RADAR_WIDE_SAMPLE_SIZE = 8
         const val RADAR_LOCAL_SAMPLE_SIZE = 4

@@ -49,7 +49,11 @@ class CloudGridHarmonizer {
         val scale = (globalHigh - globalLow) / (localHigh - localLow)
         val values = FloatArray(local.values.size) { index ->
             val value = local.values[index]
-            if (!value.isFinite()) value else ((value - localLow) * scale + globalLow).coerceIn(0f, 1f)
+            if (!value.isFinite() || value < MIN_CLOUD_LUMINANCE) {
+                value
+            } else {
+                ((value - localLow) * scale + globalLow).coerceIn(0f, 1f)
+            }
         }
         return local.copy(values = values, sourceId = local.sourceId + "|global-tone")
     }
