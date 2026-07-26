@@ -44,6 +44,16 @@ class ForecastDecisionEngine {
         )
     }
 
+    fun unavailableHourlyAtTarget(issuedAt: Instant): ForecastDecision = ForecastDecision(
+        state = RainState.UNAVAILABLE,
+        headline = "未來一小時應該不會下雨",
+        detail = "目標位置目前沒有有效的一小時累積降雨格點",
+        eventWindow = null,
+        series = listOf(ForecastPoint(60, null)),
+        issuedAt = issuedAt,
+        isStale = false,
+    )
+
     fun evaluate(
         series: List<ForecastPoint>,
         issuedAt: Instant,

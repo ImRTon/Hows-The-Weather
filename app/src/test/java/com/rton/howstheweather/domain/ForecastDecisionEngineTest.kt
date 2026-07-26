@@ -78,6 +78,17 @@ class ForecastDecisionEngineTest {
         assertNull(result.eventWindow)
     }
 
+    @Test fun `missing target in a loaded hourly grid uses the requested no rain headline`() {
+        val result = engine.unavailableHourlyAtTarget(issuedAt)
+
+        assertEquals(RainState.UNAVAILABLE, result.state)
+        assertEquals("未來一小時應該不會下雨", result.headline)
+        assertEquals("目標位置目前沒有有效的一小時累積降雨格點", result.detail)
+        assertEquals(false, result.isStale)
+        assertEquals(listOf(ForecastPoint(60, null)), result.series)
+        assertNull(result.eventWindow)
+    }
+
     @Test fun `stale hourly accumulation is explicitly labelled`() {
         val result = engine.evaluateHourlyAccumulation(6.4f, issuedAt, issuedAt.plusSeconds(31 * 60L))
 

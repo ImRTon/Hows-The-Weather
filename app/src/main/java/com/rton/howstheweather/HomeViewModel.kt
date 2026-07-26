@@ -684,7 +684,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private fun decisionFor(loaded: WeatherSnapshot, point: GeoPoint): ForecastDecision {
         val hourlyGrid = loaded.rainForecast.firstOrNull { it.unit == WeatherUnit.MILLIMETERS_ONE_HOUR }
         if (hourlyGrid != null) {
-            return decisionEngine.evaluateHourlyAccumulation(hourlyGrid.sample(point), loaded.issuedAt)
+            val hourlyAmount = hourlyGrid.sample(point)
+                ?: return decisionEngine.unavailableHourlyAtTarget(loaded.issuedAt)
+            return decisionEngine.evaluateHourlyAccumulation(hourlyAmount, loaded.issuedAt)
         }
         val series = loaded.rainForecast.map { grid ->
             ForecastPoint(
