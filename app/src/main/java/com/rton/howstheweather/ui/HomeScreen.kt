@@ -80,7 +80,9 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -107,16 +109,12 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         when (state.destination) {
-            AppDestination.NOW -> ResizableWeatherPanels(
-                state = state,
-                viewModel = viewModel,
-                modifier = Modifier.padding(padding).fillMaxSize(),
-            )
             AppDestination.FORECAST -> ForecastScreen(
                 state = state,
                 modifier = Modifier.padding(padding).fillMaxSize(),
             )
-            AppDestination.PRECIPITATION -> QuantitativePrecipitationScreen(
+            AppDestination.NOW,
+            AppDestination.PRECIPITATION -> WeatherWorkspace(
                 state = state,
                 viewModel = viewModel,
                 modifier = Modifier.padding(padding).fillMaxSize(),
@@ -233,7 +231,7 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
 }
 
 @Composable
-private fun ResizableWeatherPanels(
+private fun WeatherWorkspace(
     state: HomeUiState,
     viewModel: HomeViewModel,
     modifier: Modifier = Modifier,
@@ -278,52 +276,56 @@ private fun ResizableWeatherPanels(
             dragFraction = if (bounds.totalHeight > 0f) nextHeight / bounds.totalHeight else 0f
         }
 
+        val mapModifier = when (state.destination) {
+            AppDestination.NOW -> Modifier
+                .fillMaxWidth()
+                .offset(y = displayedHeight + actualHandleVisualHeight)
+                .height(
+                    (bounds.totalHeight - displayedHeight.value - bounds.handleHeight)
+                        .coerceAtLeast(0f)
+                        .dp,
+                )
+            AppDestination.PRECIPITATION,
+            AppDestination.FORECAST -> Modifier.fillMaxSize()
+        }
+
         Box(Modifier.fillMaxSize()) {
-            DecisionPanel(
-                state = state,
-                modifier = Modifier.fillMaxWidth().height(displayedHeight),
-            )
-            WeatherMap(
-                state,
-                viewModel,
-                Modifier
-                    .fillMaxWidth()
-                    .offset(y = displayedHeight + actualHandleVisualHeight)
-                    .height(
-                        (bounds.totalHeight - displayedHeight.value - bounds.handleHeight)
-                            .coerceAtLeast(0f)
-                            .dp,
-                    ),
-            )
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(actualHandleVisualHeight)
-                    .offset(y = displayedHeight)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .zIndex(1f),
-            )
-            PanelHandle(
-                onClick = viewModel::cyclePanel,
-                visualHeight = actualHandleVisualHeight,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .width(72.dp)
-                    .height(handleTouchHeight)
-                    .offset(y = handleTouchOffset)
-                    .zIndex(1f)
-                    .draggable(
-                        state = dragState,
-                        orientation = Orientation.Vertical,
-                        onDragStarted = { dragging = true },
-                        onDragStopped = {
-                            dragging = false
-                            val nearest = PanelAnchor.entries.minBy { abs(fraction(it) - dragFraction) }
-                            dragFraction = fraction(nearest)
-                            viewModel.setPanel(nearest)
-                        },
-                    ),
-            )
+            PersistentWeatherMap(state, viewModel, mapModifier)
+            if (state.destination == AppDestination.NOW) {
+                DecisionPanel(
+                    state = state,
+                    modifier = Modifier.fillMaxWidth().height(displayedHeight),
+                )
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(actualHandleVisualHeight)
+                        .offset(y = displayedHeight)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .zIndex(1f),
+                )
+                PanelHandle(
+                    onClick = viewModel::cyclePanel,
+                    visualHeight = actualHandleVisualHeight,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .width(72.dp)
+                        .height(handleTouchHeight)
+                        .offset(y = handleTouchOffset)
+                        .zIndex(1f)
+                        .draggable(
+                            state = dragState,
+                            orientation = Orientation.Vertical,
+                            onDragStarted = { dragging = true },
+                            onDragStopped = {
+                                dragging = false
+                                val nearest = PanelAnchor.entries.minBy { abs(fraction(it) - dragFraction) }
+                                dragFraction = fraction(nearest)
+                                viewModel.setPanel(nearest)
+                            },
+                        ),
+                )
+            }
         }
     }
 }
@@ -640,10 +642,17 @@ private fun weatherIconColor(description: String): Color = when {
 }
 
 @Composable
-private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: Modifier = Modifier) {
+private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val cameraState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(
+            LatLng(state.mapCenter.latitude, state.mapCenter.longitude),
+            state.mapZoom,
+        )
+    }
     val fused = remember { LocationServices.getFusedLocationProviderClient(context) }
     var locating by remember { mutableStateOf(false) }
+    var recenterRequest by remember { mutableStateOf<GeoPoint?>(null) }
     val requestDeviceLocation = {
         if (!locating) {
             locating = true
@@ -651,7 +660,14 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
                 client = fused,
                 onSuccess = { location ->
                     locating = false
-                    viewModel.selectTarget(GeoPoint(location.latitude, location.longitude), true)
+                    val point = GeoPoint(location.latitude, location.longitude)
+                    if (shouldRefreshDeviceTarget(state.target, point)) {
+                        viewModel.selectTarget(point, true)
+                    } else {
+                        // Recenter a panned map without invalidating and
+                        // downloading all location-dependent weather again.
+                        recenterRequest = point
+                    }
                 },
                 onFailure = { reason ->
                     locating = false
@@ -672,12 +688,6 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (granted) requestDeviceLocation()
         else permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
-    }
-    val cameraState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(
-            LatLng(state.target.coordinate.latitude, state.target.coordinate.longitude),
-            DEFAULT_MAP_ZOOM,
-        )
     }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapLoadTimedOut by remember { mutableStateOf(false) }
@@ -715,10 +725,12 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
     }
     val renderTheme = if (darkMap) RenderTheme.DARK else RenderTheme.LIGHT
     val grid = state.activeGrid
+    val quantitativeGrid = state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
     // Keep the Maps SDK attribution clear of our bottom controls and legend.
     // The Android Maps SDK fixes the logo to the start edge and only exposes
     // padding for moving its built-in attribution away from overlapping UI.
     val mapBottomContentPadding = when {
+        state.destination == AppDestination.PRECIPITATION -> 120.dp
         state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN && state.legendExpanded -> 108.dp
         state.legendExpanded -> 96.dp
         state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> 72.dp
@@ -741,17 +753,28 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
             )
         }
     }
+    val quantitativeTileProvider = remember(quantitativeGrid, renderTheme) {
+        quantitativeGrid?.let {
+            val style = when (it.unit) {
+                WeatherUnit.MILLIMETERS_ONE_HOUR -> WeatherRenderStyle.hourlyRain(renderTheme, 1f)
+                WeatherUnit.MILLIMETERS_PER_HOUR -> WeatherRenderStyle.rain(renderTheme, 1f)
+                WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(renderTheme, 1f)
+                else -> null
+            }
+            style?.let { renderStyle -> WeatherTileProvider(it, renderStyle) }
+        }
+    }
     var frontTileSlot by remember(grid?.unit, renderTheme) { mutableIntStateOf(0) }
     var displayedGrid by remember(grid?.unit, renderTheme) { mutableStateOf(grid) }
     var displayedMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
     var timelineFromMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
     var timelineToMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
     val tileBlend = remember(grid?.unit, renderTheme) { Animatable(0f) }
-    LaunchedEffect(mapLoaded, grid, tileProviders) {
+    LaunchedEffect(mapLoaded, state.destination, grid, tileProviders) {
         // TileOverlayState is attached only after TileOverlay enters the map
         // composition. Clearing it before that point throws and crashes the
         // app when weather data arrives before Maps finishes loading.
-        if (!mapLoaded) return@LaunchedEffect
+        if (!mapLoaded || state.destination != AppDestination.NOW) return@LaunchedEffect
         val providers = tileProviders ?: return@LaunchedEffect
         val targetGrid = grid ?: return@LaunchedEffect
         if (displayedGrid === targetGrid) {
@@ -769,6 +792,7 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
         // viewport. The cache is shared, so the hidden provider can consume the
         // prepared PNGs immediately without clearing the visible overlay.
         withContext(Dispatchers.Default) { frontProvider.preloadGrid(targetGrid) }
+        currentCoroutineContext().ensureActive()
         backProvider.updateGrid(targetGrid)
         if (backTileSlot == 0) firstTileOverlayState.clearTileCache()
         else secondTileOverlayState.clearTileCache()
@@ -802,6 +826,7 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
     } else {
         state.selectedMinute.toFloat()
     }
+    var lastCameraTarget by remember { mutableStateOf(state.target) }
 
     Box(modifier) {
         GoogleMap(
@@ -825,40 +850,55 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
             onMapLongClick = { viewModel.selectTarget(GeoPoint(it.latitude, it.longitude)) },
             onMapLoaded = { mapLoaded = true },
         ) {
-            MapEffect(state.target.coordinate, state.target.isDeviceLocation) { googleMap ->
-                val targetZoom = if (state.target.isDeviceLocation) {
+            MapEffect(state.target, recenterRequest) { googleMap ->
+                val targetChanged = state.target != lastCameraTarget
+                val requestedPoint = recenterRequest ?: state.target.coordinate.takeIf { targetChanged }
+                lastCameraTarget = state.target
+                if (requestedPoint == null) return@MapEffect
+                val targetZoom = if (recenterRequest != null || state.target.isDeviceLocation) {
                     DEFAULT_MAP_ZOOM
-                } else {
-                    cameraState.position.zoom.coerceAtLeast(10f)
-                }
+                } else cameraState.position.zoom.coerceAtLeast(10f)
                 val current = googleMap.cameraPosition
-                val needsMove = abs(current.target.latitude - state.target.coordinate.latitude) > .00001 ||
-                    abs(current.target.longitude - state.target.coordinate.longitude) > .00001 ||
+                val needsMove = abs(current.target.latitude - requestedPoint.latitude) > .00001 ||
+                    abs(current.target.longitude - requestedPoint.longitude) > .00001 ||
                     abs(current.zoom - targetZoom) > .01f
                 if (needsMove) {
                     googleMap.animateCamera(
                         CameraUpdateFactory.newLatLngZoom(
-                            LatLng(state.target.coordinate.latitude, state.target.coordinate.longitude),
+                            LatLng(requestedPoint.latitude, requestedPoint.longitude),
                             targetZoom,
                         ),
                         650,
                         null,
                     )
                 }
+                recenterRequest = null
             }
             if (mapLoaded && tileProviders != null) {
                 TileOverlay(
                     tileProvider = tileProviders[0],
                     state = firstTileOverlayState,
-                    transparency = 1f - state.layers.opacity * tileWeights.first,
+                    transparency = if (state.destination == AppDestination.NOW) {
+                        1f - state.layers.opacity * tileWeights.first
+                    } else 1f,
                     fadeIn = false,
                     zIndex = 2f,
                 )
                 TileOverlay(
                     tileProvider = tileProviders[1],
                     state = secondTileOverlayState,
-                    transparency = 1f - state.layers.opacity * tileWeights.second,
+                    transparency = if (state.destination == AppDestination.NOW) {
+                        1f - state.layers.opacity * tileWeights.second
+                    } else 1f,
                     fadeIn = false,
+                    zIndex = 2f,
+                )
+            }
+            if (state.destination == AppDestination.PRECIPITATION && mapLoaded && quantitativeTileProvider != null) {
+                TileOverlay(
+                    tileProvider = quantitativeTileProvider,
+                    transparency = 1f - QUANTITATIVE_FORECAST_OPACITY,
+                    fadeIn = true,
                     zIndex = 2f,
                 )
             }
@@ -867,7 +907,7 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
                 title = state.target.displayName,
             )
         }
-        if (state.layers.windEnabled) {
+        if (state.destination == AppDestination.NOW && state.layers.windEnabled) {
             val position = cameraState.position
             WindParticleOverlay(
                 windGrid = state.windGrid,
@@ -884,18 +924,29 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
                 modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 72.dp),
             )
         }
-        MapControls(state, viewModel, Modifier.align(Alignment.TopCenter))
-        if (state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN) {
-            OneHourRainControls(state, Modifier.align(Alignment.BottomCenter))
-        } else {
-            TimelineControls(
+        if (state.destination == AppDestination.NOW) {
+            MapControls(state, viewModel, Modifier.align(Alignment.TopCenter))
+            if (state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN) {
+                OneHourRainControls(state, Modifier.align(Alignment.BottomCenter))
+            } else {
+                TimelineControls(
+                    state = state,
+                    viewModel = viewModel,
+                    timelineMinute = timelineMinute,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
+        } else if (state.destination == AppDestination.PRECIPITATION) {
+            QuantitativePrecipitationControls(
                 state = state,
                 viewModel = viewModel,
-                timelineMinute = timelineMinute,
-                modifier = Modifier.align(Alignment.BottomCenter),
+                locating = locating,
+                onLocate = locateOrRequestPermission,
+                cameraZoom = cameraState.position.zoom,
+                modifier = Modifier.fillMaxSize(),
             )
         }
-        FloatingActionButton(
+        if (state.destination == AppDestination.NOW) FloatingActionButton(
             onClick = locateOrRequestPermission,
             modifier = Modifier
                 .align(Alignment.CenterEnd)
@@ -909,7 +960,8 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
             else Icon(Icons.Default.MyLocation, "回到目前位置")
         }
         AnimatedVisibility(
-            visible = state.layers.primary == PrimaryLayer.RADAR_RAIN &&
+            visible = state.destination == AppDestination.NOW &&
+                state.layers.primary == PrimaryLayer.RADAR_RAIN &&
                 state.radarCoverage == RadarCoverage.LOCAL && cameraState.position.zoom >= 11f,
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -946,6 +998,26 @@ private fun WeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: M
             }
         }
     }
+}
+
+internal fun shouldRefreshDeviceTarget(
+    current: TargetLocation,
+    candidate: GeoPoint,
+    thresholdMeters: Double = DEVICE_LOCATION_REFRESH_THRESHOLD_METERS,
+): Boolean {
+    if (!current.isDeviceLocation) return true
+    val latitudeDelta = Math.toRadians(candidate.latitude - current.coordinate.latitude)
+    val longitudeDelta = Math.toRadians(candidate.longitude - current.coordinate.longitude)
+    val firstLatitude = Math.toRadians(current.coordinate.latitude)
+    val secondLatitude = Math.toRadians(candidate.latitude)
+    val haversine = kotlin.math.sin(latitudeDelta / 2).let { it * it } +
+        kotlin.math.cos(firstLatitude) * kotlin.math.cos(secondLatitude) *
+        kotlin.math.sin(longitudeDelta / 2).let { it * it }
+    val angularDistance = 2 * kotlin.math.atan2(
+        kotlin.math.sqrt(haversine),
+        kotlin.math.sqrt((1 - haversine).coerceAtLeast(0.0)),
+    )
+    return EARTH_RADIUS_METERS * angularDistance >= thresholdMeters
 }
 
 @SuppressLint("MissingPermission")
@@ -991,6 +1063,8 @@ private const val LOCATION_FALLBACK_MAX_AGE_MILLIS = 30 * 60 * 1_000L
 private const val LOCATION_REQUEST_TIMEOUT_MILLIS = 5_000L
 private const val TILE_BACK_BUFFER_SETTLE_MILLIS = 32L
 private const val TILE_BLEND_DURATION_MILLIS = 650
+private const val DEVICE_LOCATION_REFRESH_THRESHOLD_METERS = 100.0
+private const val EARTH_RADIUS_METERS = 6_371_000.0
 
 internal data class TileBlendWeights(val first: Float, val second: Float)
 

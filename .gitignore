@@ -6,3 +6,4 @@ local.properties
 secrets.properties
 *.iml
 gradle/gradle-daemon-jvm.properties
+.kotlin/

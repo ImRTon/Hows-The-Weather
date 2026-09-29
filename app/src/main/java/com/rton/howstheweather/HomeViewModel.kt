@@ -108,6 +108,11 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             layers = LayerSelection(
                 windEnabled = savedStateHandle.get<Boolean>(WIND_ENABLED_STATE_KEY) ?: false,
             ),
+            mapCenter = GeoPoint(
+                savedStateHandle.get<Double>(MAP_CENTER_LATITUDE_STATE_KEY) ?: initialTarget.coordinate.latitude,
+                savedStateHandle.get<Double>(MAP_CENTER_LONGITUDE_STATE_KEY) ?: initialTarget.coordinate.longitude,
+            ),
+            mapZoom = savedStateHandle.get<Float>(MAP_ZOOM_STATE_KEY) ?: DEFAULT_MAP_ZOOM,
             destination = savedStateHandle.get<String>("destination")
                 ?.let { runCatching { AppDestination.valueOf(it) }.getOrNull() }
                 ?: AppDestination.NOW,
@@ -785,6 +790,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     }
 
     fun setMapViewport(center: GeoPoint, zoom: Float) {
+        savedStateHandle[MAP_CENTER_LATITUDE_STATE_KEY] = center.latitude
+        savedStateHandle[MAP_CENTER_LONGITUDE_STATE_KEY] = center.longitude
+        savedStateHandle[MAP_ZOOM_STATE_KEY] = zoom
         val previous = _uiState.value
         val coverage = resolveCloudCoverage(previous.cloudCoverage, zoom, center, snapshot)
         val radarCoverage = resolveRadarCoverage(previous.radarCoverage, zoom, center, snapshot)
@@ -1213,6 +1221,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         val WIND_ENABLED_KEY = booleanPreferencesKey("wind_enabled")
         const val PANEL_ANCHOR_STATE_KEY = "panelAnchor"
         const val WIND_ENABLED_STATE_KEY = "windEnabled"
+        const val MAP_CENTER_LATITUDE_STATE_KEY = "mapCenterLatitude"
+        const val MAP_CENTER_LONGITUDE_STATE_KEY = "mapCenterLongitude"
+        const val MAP_ZOOM_STATE_KEY = "mapZoom"
         const val TIMELINE_END_MINUTE = 0
         const val PLAYBACK_FRAME_DURATION_MILLIS = 1_000L
         const val WEATHER_FRAME_PRESENT_TIMEOUT_MILLIS = 15_000L
