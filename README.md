@@ -1,139 +1,102 @@
-<div align="center">
-
 # How’s the Weather
 
-### 不只報數字，把雨畫給你看
+出門前想知道會不會下雨，打開看一眼。
 
-一款為台灣日常移動打造的 Android 視覺化天氣判讀 App。<br>
-先用摘要抓住重點，再把雷達、雨量、雲層與風場直接疊在地圖上。<br>
-不讓冰冷的數字替你做決定，而是讓你看見天氣，自行判斷現在是否適合出門。
+畫面上方有一句簡短的結論，下方是地圖。雨下在哪裡、往哪裡移動，可以在地圖上自己看。
 
-`Kotlin` · `Jetpack Compose` · `Material 3` · `Google Maps` · `CWA Open Data`
-
-[核心體驗](#核心體驗) · [畫面巡覽](#畫面巡覽) · [開始使用](#run) · [資料邊界](#data-boundaries)
-
-</div>
+Kotlin · Jetpack Compose · Material 3 · Google Maps · 中央氣象署開放資料
 
 <table>
   <tr>
     <td width="33.33%" align="center">
-      <img src="docs/Image00005.jpg" alt="展開的出門決策卡與雷達地圖" width="260"><br>
-      <strong>重點先行</strong><br>
-      <sub>摘要快速抓方向，最終判斷留給你</sub>
+      <img src="docs/Image00005.jpg" alt="展開的決策卡與雷達地圖" width="260"><br>
+      <sub>先看結論</sub>
     </td>
     <td width="33.33%" align="center">
       <img src="docs/Image00007.jpg" alt="未來一小時累積雨量與地圖" width="260"><br>
-      <strong>雨區看得見</strong><br>
-      <sub>從地圖直觀看懂雨在哪裡、離你多近</sub>
+      <sub>未來一小時雨量</sub>
     </td>
     <td width="33.33%" align="center">
       <img src="docs/Image00002.jpg" alt="逐時與本週天氣預報" width="260"><br>
-      <strong>數字有脈絡</strong><br>
-      <sub>用逐時與本週預報補足地圖之外的細節</sub>
+      <sub>逐時與一週預報</sub>
     </td>
   </tr>
 </table>
 
-## 核心體驗
+## 怎麼用
 
-<table>
-  <tr>
-    <td width="50%">
-      <strong>01 · 視覺判斷，不是數字堆疊</strong><br>
-      <sub>把氣象網格轉成地圖 overlay，雨區、強弱與空間關係不必靠一串數字想像。</sub>
-    </td>
-    <td width="50%">
-      <strong>02 · 以你的目的地為中心</strong><br>
-      <sub>地圖標記、摘要、天氣圖層與時間軸始終指向同一位置，判斷才真正與行程有關。</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <strong>03 · 看見雨勢如何變化</strong><br>
-      <sub>回看雷達觀測，再切換一小時與 0–48 小時雨量，用時間脈絡理解雨勢走向。</sub>
-    </td>
-    <td width="50%">
-      <strong>04 · 多種 overlay，一張熟悉的地圖</strong><br>
-      <sub>區域雷達、累積雨量、雲層與風場疊加在 Google Maps 上，直接對照道路與地點。</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <strong>05 · 摘要是提示，不是命令</strong><br>
-      <sub>一句話先整理重點，同時保留完整視覺證據，讓使用者自己做最後判斷。</sub>
-    </td>
-    <td width="50%">
-      <strong>06 · 資訊密度由你決定</strong><br>
-      <sub>拖曳摘要面板，在完整資訊與大地圖間自然切換；資料精度與來源也清楚標示。</sub>
-    </td>
-  </tr>
-</table>
-
-## 畫面巡覽
+- 預設地點是台北，授權定位後改為目前位置。長按地圖可以換一個地方。
+- 拖曳中間的把手，調整摘要和地圖的比例；點一下則在三種高度之間切換。收到最小時，只留一行摘要和降雨機率。
+- 地圖圖層有「降雨雷達」和「雲層 β」兩種，一次選一個。風場可以另外疊加。
+- 時間軸可以回看過去 90 分鐘的雷達觀測，每 10 分鐘一格，也能切換到一小時與 0–48 小時的累積雨量預報。
 
 <table>
   <tr>
     <td width="50%" align="center">
       <img src="docs/Image00006.jpg" alt="收合決策卡後的大地圖模式" width="360"><br>
-      <strong>可調整的決策卡與地圖</strong><br>
-      <sub>收合後保留摘要與降雨機率，把更多空間交給可互動地圖。</sub>
+      <sub>收合摘要，留給地圖</sub>
     </td>
     <td width="50%" align="center">
-      <img src="docs/Image00001.jpg" alt="雲層、風場與歷史時間軸" width="360"><br>
-      <strong>多圖層天氣證據</strong><br>
-      <sub>切換雷達、雨量與雲層，並獨立疊加風向、風速和粒子風場。</sub>
+      <img src="docs/Image00001.jpg" alt="雲層、風場與時間軸" width="360"><br>
+      <sub>雲層與風場</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <img src="docs/Image00004.jpg" alt="目前雷達觀測與過去九十分鐘時間軸" width="360"><br>
-      <strong>回看雨區如何移動</strong><br>
-      <sub>透過播放控制與過去 90 分鐘時間軸檢視雷達觀測。</sub>
+      <img src="docs/Image00004.jpg" alt="雷達觀測與過去九十分鐘時間軸" width="360"><br>
+      <sub>回看雷達</sub>
     </td>
     <td width="50%" align="center">
       <img src="docs/Image00003.jpg" alt="十二至二十四小時累積雨量預報" width="360"><br>
-      <strong>中短期累積雨量地圖</strong><br>
-      <sub>以預報區間、數值色階、等值線和原始格點提示判讀雨量。</sub>
+      <sub>12–24 小時累積雨量</sub>
     </td>
   </tr>
 </table>
 
----
+## 執行
 
-## Visual weather, numerical integrity
+1. 將 `local.properties.example` 複製為 `local.properties`，保留原本的 `sdk.dir`。
+2. 填入以下金鑰：
+   - `MAPS_API_KEY`：Google Maps。
+   - `MAP_ID`：選填，使用 Cloud Styling 時才需要。
+   - `CWA_API_KEY`：中央氣象署開放資料。
+   - `MOENV_API_KEY`：選填，用於目前的空氣品質。
+3. 用 Android Studio 開啟專案，執行 `app`。
 
-The app renders CWA numerical weather grids itself. Radar and quantitative rainfall never fall back to CWA’s pre-colored Jet/rainbow images. The renderer uses a perceptually interpolated OKLab lookup table, bounded bilinear sampling, and value contours on Google Maps tiles.
+沒有 `CWA_API_KEY` 或下載失敗時，會改用示範資料。
 
-## Run
+### 底圖切換
 
-1. Copy `local.properties.example` to `local.properties` and keep your existing `sdk.dir` entry.
-2. Add an Android-restricted `MAPS_API_KEY`, optional cloud styling `MAP_ID`, personal `CWA_API_KEY`, and optional `MOENV_API_KEY` for current AQI.
-3. Open the project in Android Studio and run the `app` configuration.
+底圖在建置時決定，App 內沒有切換開關。在 `local.properties` 設定後重新建置即可：
 
-With `CWA_API_KEY`, the app loads the official transparent radar overlays, satellite images, and one-hour accumulated-rainfall grid. Without it—or when a request fails—it starts with deterministic numerical demo grids so the panel interaction, custom renderer, themes, timeline, wind markers, and decision engine remain testable. The fallback reason is shown in the app.
+```properties
+MAP_PROVIDER=google   # 預設，需要 MAPS_API_KEY
+MAP_PROVIDER=osm      # OpenStreetMap（osmdroid），不需金鑰
+```
 
-The map timeline plays observations chronologically from the previous 30 minutes to now, while the decision card remains based only on the official rainfall product.
+`osm` 預設使用 CARTO Positron／Dark Matter 圖磚（OpenStreetMap 資料），淺色與深色主題各自對應。可用 `OSM_TILE_URL_LIGHT`、`OSM_TILE_URL_DARK` 改成其他 `{z}/{x}/{y}` 圖磚網址（`{s}` 為 a–d 子網域，`{r}` 為 `@2x`），並以 `OSM_TILE_ATTRIBUTION` 設定對應的版權標示（`local.properties` 以 ISO-8859-1 讀取，`©` 等非 ASCII 字元請寫成 `\u00A9`）。CARTO 免費圖磚僅限非商業用途。
 
-## Data boundaries
+## 資料來源
 
-- `F-B0046-001`: official one-hour accumulated-rainfall grid. It is a single field, not a native 0–60 minute sequence, so the app does not invent minute-level onset or easing times from it.
-- `O-A0058-005` / `O-A0058-006`: official transparent, annotation-free radar layers for wide/local LOD. Their finite palette is decoded to dBZ bins; transparent or non-palette pixels remain missing.
-- `O-B0032-003` / `O-C0042-004`: neutral infrared satellite imagery for East Asia/Taiwan LOD. The East Asia image uses CWA's documented Lambert projection; the Taiwan product uses its exact `GeoInfo` bounds. No global cloud image is downloaded.
-- `O-A0001-001`: station wind observations.
-- `F-D0047-*`: native three-day and one-week town forecasts. The UI preserves their 3-hour and 12-hour periods.
-- `AQX_P_432`: Ministry of Environment hourly AQI observations from the nearest valid station; this is current air quality, not a future AQI forecast.
+| 代碼 | 內容 |
+| --- | --- |
+| `F-B0046-001` | 未來一小時累積雨量格點 |
+| `O-A0058-005` / `O-A0058-006` | 雷達回波（大範圍／局部） |
+| `O-B0032-003` / `O-C0042-004` | 紅外線衛星雲圖（東亞／台灣） |
+| `O-A0001-001` | 測站風場觀測 |
+| `F-D0047-*` | 鄉鎮三天與一週預報 |
+| `AQX_P_432` | 環境部空氣品質觀測 |
 
-The current repository includes the verified CWA common-JSON parser, lower-left-origin row conversion, live source, and demo fallback. Production credentials stay outside version control. A public release should proxy CWA through a backend because an APK cannot keep that key secret.
+## 程式結構
 
-## Important modules
+- `domain/`：天氣格點與判斷規則
+- `data/`：資料下載、快取與解析
+- `render/`：地圖圖磚、色階與等值線
+- `ui/`：主畫面
 
-- `domain/`: weather grid, decision types, and stable event-window rules.
-- `render/`: Web Mercator tile generation, OKLab LUT, contours, and native-resolution grid cue.
-- `data/`: staged current/history acquisition, bounded background image preprocessing, cache, and CWA parsers.
-- `ui/`: resizable three-anchor decision/map home screen.
-
-## Verification
+## 測試
 
 ```powershell
-./gradlew.bat :app:testDebugUnitTest :app:compileDebugKotlin
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
+./gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:lintDebug --console=plain
 ```
