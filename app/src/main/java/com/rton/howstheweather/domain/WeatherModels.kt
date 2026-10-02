@@ -38,9 +38,13 @@ data class WeatherGrid(
 
     fun sample(point: GeoPoint): Float? = sample(point.latitude, point.longitude)
 
-    fun sample(latitude: Double, longitude: Double): Float? {
+    fun sample(latitude: Double, longitude: Double): Float? =
+        sampleOrNaN(latitude, longitude).takeUnless { it.isNaN() }
+
+    /** Allocation-free variant for per-pixel rendering; missing or out-of-bounds values are NaN. */
+    fun sampleOrNaN(latitude: Double, longitude: Double): Float {
         val gridLongitude = if (bounds.east > 180.0 && longitude < bounds.west) longitude + 360.0 else longitude
-        if (latitude !in bounds.south..bounds.north || gridLongitude !in bounds.west..bounds.east) return null
+        if (latitude !in bounds.south..bounds.north || gridLongitude !in bounds.west..bounds.east) return Float.NaN
         val fx = ((gridLongitude - bounds.west) / (bounds.east - bounds.west) * (width - 1))
             .coerceIn(0.0, (width - 1).toDouble())
         val fy = ((bounds.north - latitude) / (bounds.north - bounds.south) * (height - 1))
@@ -56,7 +60,7 @@ data class WeatherGrid(
         val bottomRight = valueAt(x0 + 1, y0 + 1)
         if (!topLeft.isFinite() || !topRight.isFinite() || !bottomLeft.isFinite() || !bottomRight.isFinite() ||
             topLeft == missingValue || topRight == missingValue || bottomLeft == missingValue || bottomRight == missingValue
-        ) return null
+        ) return Float.NaN
         val top = topLeft + (topRight - topLeft) * tx
         val bottom = bottomLeft + (bottomRight - bottomLeft) * tx
         return top + (bottom - top) * ty

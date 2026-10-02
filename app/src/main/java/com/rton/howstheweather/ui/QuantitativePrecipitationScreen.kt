@@ -25,6 +25,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,10 +48,11 @@ internal fun QuantitativePrecipitationControls(
     viewModel: HomeViewModel,
     locating: Boolean,
     onLocate: () -> Unit,
-    cameraZoom: Float,
+    cameraZoom: () -> Float,
     modifier: Modifier = Modifier,
 ) {
     val grid = state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
+    val streetLevel by remember { derivedStateOf { cameraZoom() >= 11f } }
     Box(modifier) {
         QuantitativeRainSummary(
             state = state,
@@ -73,7 +76,7 @@ internal fun QuantitativePrecipitationControls(
             else Icon(Icons.Default.MyLocation, "回到目前位置")
         }
         AnimatedVisibility(
-            visible = grid != null && cameraZoom >= 11f,
+            visible = grid != null && streetLevel,
             modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 164.dp),
         ) {
             Text(

@@ -5,6 +5,7 @@ import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.WindObservation
 import java.time.Instant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -44,8 +45,35 @@ class WindParticleOverlayTest {
     fun `wind particles become sparser as the map zooms in`() {
         assertTrue(windParticleSpacingDp(7f) < windParticleSpacingDp(12f))
         assertTrue(windParticleSpacingDp(12f) < windParticleSpacingDp(16f))
-        assertEquals(46f, windParticleSpacingDp(3f), 0f)
-        assertEquals(72f, windParticleSpacingDp(20f), 0f)
+        assertEquals(26f, windParticleSpacingDp(3f), 0f)
+        assertEquals(64f, windParticleSpacingDp(20f), 0f)
+    }
+
+    @Test
+    fun `regional zoom keeps a dense particle lattice`() {
+        // Taiwan-wide views (about zoom 7) previously spaced particles 46 dp apart.
+        assertTrue(windParticleSpacingDp(7f) < 36f)
+    }
+
+    @Test
+    fun `overscanned layout survives small gestures and rebuilds before edges show`() {
+        val reference = WindParticleCamera(GeoPoint(24.0, 121.0), zoom = 8f)
+        fun needsRebuild(current: WindParticleCamera) = windParticleLayoutNeedsRebuild(
+            reference = reference,
+            current = current,
+            width = 1_080f,
+            height = 1_200f,
+            density = 3f,
+        )
+
+        assertFalse(needsRebuild(reference))
+        assertFalse(needsRebuild(reference.copy(zoom = 7.8f)))
+        assertTrue(needsRebuild(reference.copy(zoom = 7.5f)))
+        assertTrue(needsRebuild(reference.copy(zoom = 8.5f)))
+        // One screen width east at zoom 8 is far outside the 35% overscan.
+        val oneScreenEast = 1_080.0 / (256.0 * 3.0 * 256.0) * 360.0
+        assertTrue(needsRebuild(reference.copy(center = GeoPoint(24.0, 121.0 + oneScreenEast))))
+        assertFalse(needsRebuild(reference.copy(center = GeoPoint(24.0, 121.0 + oneScreenEast * .1))))
     }
 
     @Test

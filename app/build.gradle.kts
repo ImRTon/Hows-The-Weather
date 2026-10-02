@@ -101,6 +101,18 @@ val localProperties = Properties().apply {
     if (file.exists()) file.inputStream().use(::load)
 }
 
+fun configValue(key: String, default: String = ""): String =
+    localProperties.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() } ?: default
+
+fun buildConfigString(value: String): String =
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+val mapProvider = when (val value = configValue("MAP_PROVIDER", "google").lowercase()) {
+    "google", "google_maps", "googlemaps" -> "google"
+    "osm", "openstreetmap", "open_street_map" -> "osm"
+    else -> throw GradleException("Unsupported MAP_PROVIDER '$value'. Use 'google' or 'osm'.")
+}
+
 android {
     namespace = "com.rton.howstheweather"
     compileSdk = 36
@@ -115,22 +127,30 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
 
+        buildConfigField("String", "CWA_API_KEY", buildConfigString(configValue("CWA_API_KEY")))
+        buildConfigField("String", "MAP_ID", buildConfigString(configValue("MAP_ID", "DEMO_MAP_ID")))
+        buildConfigField("String", "MOENV_API_KEY", buildConfigString(configValue("MOENV_API_KEY")))
+        buildConfigField("String", "MAP_PROVIDER", buildConfigString(mapProvider))
         buildConfigField(
             "String",
-            "CWA_API_KEY",
-            "\"${localProperties.getProperty("CWA_API_KEY", "")}\"",
+            "OSM_TILE_URL_LIGHT",
+            buildConfigString(
+                configValue("OSM_TILE_URL_LIGHT", "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"),
+            ),
         )
         buildConfigField(
             "String",
-            "MAP_ID",
-            "\"${localProperties.getProperty("MAP_ID", "DEMO_MAP_ID")}\"",
+            "OSM_TILE_URL_DARK",
+            buildConfigString(
+                configValue("OSM_TILE_URL_DARK", "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"),
+            ),
         )
         buildConfigField(
             "String",
-            "MOENV_API_KEY",
-            "\"${localProperties.getProperty("MOENV_API_KEY", "")}\"",
+            "OSM_TILE_ATTRIBUTION",
+            buildConfigString(configValue("OSM_TILE_ATTRIBUTION", "© OpenStreetMap contributors © CARTO")),
         )
-        manifestPlaceholders["MAPS_API_KEY"] = localProperties.getProperty("MAPS_API_KEY", "")
+        manifestPlaceholders["MAPS_API_KEY"] = configValue("MAPS_API_KEY")
     }
 
     buildFeatures {
@@ -179,6 +199,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.datastore:datastore-preferences:1.2.0")
     implementation("com.google.maps.android:maps-compose:6.12.0")
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")

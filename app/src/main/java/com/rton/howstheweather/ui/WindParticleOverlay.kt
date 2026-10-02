@@ -7,7 +7,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -21,7 +23,12 @@ import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.WindGrid
 import com.rton.howstheweather.domain.WindObservation
 import com.rton.howstheweather.domain.travelComponents
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.PI
 import kotlin.math.atan
 import kotlin.math.cos
@@ -33,69 +40,104 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
+/**
+ * [camera] is read only from the draw phase and background snapshot flows, so a
+ * moving Maps camera invalidates this Canvas instead of recomposing the map.
+ */
 @Composable
 internal fun WindParticleOverlay(
     windGrid: WindGrid?,
     winds: List<WindObservation>,
-    mapCenter: GeoPoint,
-    mapZoom: Float,
-    cameraMoving: Boolean,
+    camera: () -> WindParticleCamera,
     darkMap: Boolean,
     modifier: Modifier = Modifier,
 ) {
     if (windGrid == null && winds.isEmpty()) return
     var frameNanos by remember { mutableLongStateOf(0L) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+    var layout by remember { mutableStateOf<WindParticleLayout?>(null) }
     val density = LocalDensity.current.density
+    val currentCamera by rememberUpdatedState(camera)
     LaunchedEffect(Unit) {
         while (true) {
             withFrameNanos { frameNanos = it }
             delay(WIND_FRAME_INTERVAL_MILLIS)
         }
     }
-    var layoutCamera by remember {
-        mutableStateOf(WindParticleCamera(center = mapCenter, zoom = mapZoom))
-    }
-    LaunchedEffect(cameraMoving, mapCenter, mapZoom) {
-        if (!cameraMoving) {
-            layoutCamera = WindParticleCamera(center = mapCenter, zoom = mapZoom)
+    LaunchedEffect(windGrid, winds, canvasSize, density, darkMap) {
+        if (canvasSize.width <= 0 || canvasSize.height <= 0) {
+            layout = null
+            return@LaunchedEffect
         }
-    }
-    val observations = remember(winds, layoutCamera.center) {
-        selectRelevantWinds(winds, layoutCamera.center, MAX_RENDER_OBSERVATIONS).map(::asVector)
-    }
-    val particles = remember(windGrid, observations, layoutCamera, canvasSize, density, darkMap) {
-        buildWindParticles(
-            windGrid = windGrid,
-            observations = observations,
-            mapCenter = layoutCamera.center,
-            mapZoom = layoutCamera.zoom,
-            width = canvasSize.width.toFloat(),
-            height = canvasSize.height.toFloat(),
-            density = density,
-            darkMap = darkMap,
-        )
+        val width = canvasSize.width.toFloat()
+        val height = canvasSize.height.toFloat()
+        var latestRequest = 0
+        suspend fun rebuild(target: WindParticleCamera) {
+            val request = ++latestRequest
+            val built = withContext(Dispatchers.Default) {
+                val observations = selectRelevantWinds(winds, target.center, MAX_RENDER_OBSERVATIONS)
+                    .map(::asVector)
+                WindParticleLayout(
+                    camera = target,
+                    particles = buildWindParticles(
+                        windGrid = windGrid,
+                        observations = observations,
+                        mapCenter = target.center,
+                        mapZoom = target.zoom,
+                        width = width,
+                        height = height,
+                        density = density,
+                        darkMap = darkMap,
+                    ),
+                )
+            }
+            // Two collectors can build concurrently; never let an older camera win.
+            if (request == latestRequest) layout = built
+        }
+        rebuild(currentCamera())
+        launch {
+            // During a gesture, rebuild only when the overscanned lattice is about
+            // to run out; conflation drops camera frames that arrive mid-build.
+            snapshotFlow { currentCamera() }
+                .conflate()
+                .collect { target ->
+                    val current = layout
+                    if (current == null ||
+                        windParticleLayoutNeedsRebuild(current.camera, target, width, height, density)
+                    ) rebuild(target)
+                }
+        }
+        // Once the camera settles, refresh so lattice crossfade and sampling match exactly.
+        snapshotFlow { currentCamera() }.collectLatest { target ->
+            delay(WIND_SETTLE_REBUILD_MILLIS)
+            if (layout?.camera != target) rebuild(target)
+        }
     }
     Canvas(
         modifier.onSizeChanged { size ->
             if (canvasSize != size) canvasSize = size
         },
     ) {
+        val current = layout ?: return@Canvas
         val timeSeconds = frameNanos / 1_000_000_000.0
         val cameraTransform = windParticleCameraTransform(
-            reference = layoutCamera,
-            current = WindParticleCamera(mapCenter, mapZoom),
+            reference = current.camera,
+            current = currentCamera(),
             density = density,
         )
         val canvasCenter = Offset(size.width / 2f, size.height / 2f)
         clipRect(0f, 0f, size.width, size.height) {
-            particles.forEach { particle ->
-                val phase = (
-                    (timeSeconds * (.22 + particle.speed * .035) + pseudoRandom(particle.seed + 4096)) % 1.0
-                    ).toFloat()
+            current.particles.forEach { particle ->
                 val base = canvasCenter +
                     (particle.base - canvasCenter) * cameraTransform.scale +
                     cameraTransform.translation
+                val reach = (particle.travelDistance + particle.length) * cameraTransform.scale
+                if (base.x < -reach || base.x > size.width + reach ||
+                    base.y < -reach || base.y > size.height + reach
+                ) return@forEach
+                val phase = (
+                    (timeSeconds * (.22 + particle.speed * .035) + particle.phaseOffset) % 1.0
+                    ).toFloat()
                 val head = base +
                     particle.direction * (particle.travelDistance * phase * cameraTransform.scale)
                 drawComet(
@@ -122,11 +164,41 @@ internal data class WindParticleCameraTransform(
     val translation: Offset,
 )
 
+private class WindParticleLayout(
+    val camera: WindParticleCamera,
+    val particles: List<RenderWindParticle>,
+)
+
 /**
- * Reprojects the settled particle layout while the Maps camera is moving.
+ * A layout covers the viewport plus [WIND_LAYOUT_OVERSCAN] on every side. It is
+ * rebuilt before a pan or zoom-out exposes its uncovered edge, or when the zoom
+ * has drifted enough that the lattice crossfade weights are visibly stale.
+ */
+internal fun windParticleLayoutNeedsRebuild(
+    reference: WindParticleCamera,
+    current: WindParticleCamera,
+    width: Float,
+    height: Float,
+    density: Float,
+): Boolean {
+    if (kotlin.math.abs(current.zoom - reference.zoom) >= WIND_LAYOUT_MAX_ZOOM_DRIFT) return true
+    val transform = windParticleCameraTransform(reference, current, density)
+    val slack = WIND_LAYOUT_OVERSCAN * .5f
+    val centerX = width / 2f
+    val centerY = height / 2f
+    fun layoutX(screenX: Float) = centerX + (screenX - centerX - transform.translation.x) / transform.scale
+    fun layoutY(screenY: Float) = centerY + (screenY - centerY - transform.translation.y) / transform.scale
+    return layoutX(0f) < -width * slack ||
+        layoutX(width) > width * (1f + slack) ||
+        layoutY(0f) < -height * slack ||
+        layoutY(height) > height * (1f + slack)
+}
+
+/**
+ * Reprojects the most recent particle layout while the Maps camera is moving.
  *
  * This keeps existing seeds and animation phases alive during a gesture. Sampling and lattice
- * construction happen once after the camera settles instead of on every Maps camera callback.
+ * construction run in the background only when the overscanned layout is exhausted.
  */
 internal fun windParticleCameraTransform(
     reference: WindParticleCamera,
@@ -151,8 +223,8 @@ internal fun windParticleCameraTransform(
     )
 }
 
-private data class RenderWindParticle(
-    val seed: Int,
+private class RenderWindParticle(
+    val phaseOffset: Double,
     val base: Offset,
     val speed: Float,
     val direction: Offset,
@@ -181,14 +253,16 @@ private fun buildWindParticles(
             val spacing = windParticleSpacingDp(layoutZoom) * density
             val viewportWidth = width / screenScale
             val viewportHeight = height / screenScale
+            val overscanX = viewportWidth * WIND_LAYOUT_OVERSCAN
+            val overscanY = viewportHeight * WIND_LAYOUT_OVERSCAN
             val centerWorldX = longitudeToWorldX(mapCenter.longitude, worldSize)
             val centerWorldY = mercatorY(mapCenter.latitude) * worldSize
             val viewportLeft = centerWorldX - viewportWidth / 2.0
             val viewportTop = centerWorldY - viewportHeight / 2.0
-            val firstColumn = floor(viewportLeft / spacing).toInt() - 1
-            val lastColumn = floor((viewportLeft + viewportWidth) / spacing).toInt() + 1
-            val firstRow = floor(viewportTop / spacing).toInt() - 1
-            val lastRow = floor((viewportTop + viewportHeight) / spacing).toInt() + 1
+            val firstColumn = floor((viewportLeft - overscanX) / spacing).toInt() - 1
+            val lastColumn = floor((viewportLeft + viewportWidth + overscanX) / spacing).toInt() + 1
+            val firstRow = floor((viewportTop - overscanY) / spacing).toInt() - 1
+            val lastRow = floor((viewportTop + viewportHeight + overscanY) / spacing).toInt() + 1
             val screenSpacing = spacing * screenScale
 
             for (row in firstRow..lastRow) for (column in firstColumn..lastColumn) {
@@ -208,12 +282,12 @@ private fun buildWindParticles(
                 if (vector.speed < .15f) continue
                 add(
                     RenderWindParticle(
-                        seed = seed,
+                        phaseOffset = pseudoRandom(seed + 4096).toDouble(),
                         base = base,
                         speed = vector.speed,
                         direction = vector.normalizedScreenDirection(),
                         travelDistance = screenSpacing * 1.55f,
-                        length = screenSpacing * .34f,
+                        length = screenSpacing * .42f,
                         layoutAlpha = layout.alpha,
                         color = windColor(vector.speed, darkMap),
                     ),
@@ -307,10 +381,11 @@ internal fun selectRelevantWinds(
 }
 
 internal fun windParticleSpacingDp(zoom: Float): Float {
-    // Wider views need more visual samples; close views are deliberately sparser
-    // because the underlying station observations do not gain street-level detail.
-    val normalizedZoom = ((zoom - 7f) / 9f).coerceIn(0f, 1f)
-    return floatLerp(46f, 72f, normalizedZoom)
+    // Regional views need a denser lattice so the flow still reads when Taiwan is
+    // small on screen; close views are deliberately sparser because neither the
+    // 3 km model nor station observations gain street-level detail.
+    val normalizedZoom = ((zoom - 5f) / 10f).coerceIn(0f, 1f)
+    return floatLerp(26f, 64f, normalizedZoom)
 }
 
 internal fun windParticleAlpha(phase: Float): Float {
@@ -430,3 +505,6 @@ private const val COMET_SEGMENTS = 2
 private const val MIN_PARTICLE_LAYOUT_ZOOM = 0
 private const val MAX_PARTICLE_LAYOUT_ZOOM = 22
 private const val LAYOUT_ALPHA_EPSILON = .001f
+private const val WIND_LAYOUT_OVERSCAN = .35f
+private const val WIND_LAYOUT_MAX_ZOOM_DRIFT = .35f
+private const val WIND_SETTLE_REBUILD_MILLIS = 160L

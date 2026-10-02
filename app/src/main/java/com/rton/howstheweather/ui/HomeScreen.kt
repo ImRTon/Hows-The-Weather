@@ -1,7 +1,6 @@
 @file:OptIn(
     androidx.compose.foundation.ExperimentalFoundationApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class,
-    com.google.maps.android.compose.MapsComposeExperimentalApi::class,
 )
 
 package com.rton.howstheweather.ui
@@ -60,15 +59,7 @@ import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.GoogleMapOptions
-import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.MapStyleOptions
-import com.google.maps.android.compose.*
-import com.rton.howstheweather.BuildConfig
 import com.rton.howstheweather.HomeViewModel
-import com.rton.howstheweather.R
 import com.rton.howstheweather.data.OBSERVATION_FRAME_INTERVAL_MINUTES
 import com.rton.howstheweather.data.OBSERVATION_HISTORY_MINUTES
 import com.rton.howstheweather.domain.*
@@ -83,7 +74,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -644,12 +634,7 @@ private fun weatherIconColor(description: String): Color = when {
 @Composable
 private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val cameraState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(
-            LatLng(state.mapCenter.latitude, state.mapCenter.longitude),
-            state.mapZoom,
-        )
-    }
+    val mapCamera = remember { WeatherMapCameraState(MapCameraPosition(state.mapCenter, state.mapZoom)) }
     val fused = remember { LocationServices.getFusedLocationProviderClient(context) }
     var locating by remember { mutableStateOf(false) }
     var recenterRequest by remember { mutableStateOf<GeoPoint?>(null) }
@@ -691,30 +676,18 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapLoadTimedOut by remember { mutableStateOf(false) }
+    val windCamera = remember(mapCamera) {
+        {
+            val position = mapCamera.position
+            WindParticleCamera(position.center, position.zoom)
+        }
+    }
     LaunchedEffect(Unit) {
         val alreadyGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (alreadyGranted) requestDeviceLocation()
     }
-    LaunchedEffect(cameraState) {
-        snapshotFlow { cameraState.isMoving }
-            .filter { !it }
-            .collect {
-                val position = cameraState.position
-                viewModel.setMapViewport(
-                    center = GeoPoint(position.target.latitude, position.target.longitude),
-                    zoom = position.zoom,
-                )
-            }
-    }
     val darkMap = MaterialTheme.colorScheme.background.luminance() < .35f
-    val configuredMapId = BuildConfig.MAP_ID.trim()
-    val usesBundledMapStyle = configuredMapId.isBlank() || configuredMapId == "DEMO_MAP_ID"
-    val fallbackStyle = remember(darkMap, usesBundledMapStyle) {
-        if (usesBundledMapStyle) {
-            MapStyleOptions.loadRawResourceStyle(context, if (darkMap) R.raw.map_style_dark else R.raw.map_style_light)
-        } else null
-    }
     LaunchedEffect(mapLoaded) {
         if (!mapLoaded) {
             delay(8_000)
@@ -726,9 +699,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     val renderTheme = if (darkMap) RenderTheme.DARK else RenderTheme.LIGHT
     val grid = state.activeGrid
     val quantitativeGrid = state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
-    // Keep the Maps SDK attribution clear of our bottom controls and legend.
-    // The Android Maps SDK fixes the logo to the start edge and only exposes
-    // padding for moving its built-in attribution away from overlapping UI.
+    // Keep the base map attribution clear of our bottom controls and legend.
     val mapBottomContentPadding = when {
         state.destination == AppDestination.PRECIPITATION -> 120.dp
         state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN && state.legendExpanded -> 108.dp
@@ -736,8 +707,12 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> 72.dp
         else -> 68.dp
     }
-    val firstTileOverlayState = rememberTileOverlayState()
-    val secondTileOverlayState = rememberTileOverlayState()
+    val firstTileLayerState = remember { WeatherTileLayerState() }
+    val secondTileLayerState = remember { WeatherTileLayerState() }
+    // Both overlays attach inside the map composition, well before the base map
+    // finishes loading. Weather tiles can then load in parallel with the base map,
+    // and clearTileCache is still safe to call.
+    val tileOverlaysAttached = firstTileLayerState.isAttached && secondTileLayerState.isAttached
     val tileProviders = remember(grid?.unit, renderTheme) {
         grid?.let {
             val style = when (it.unit) {
@@ -770,11 +745,11 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     var timelineFromMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
     var timelineToMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
     val tileBlend = remember(grid?.unit, renderTheme) { Animatable(0f) }
-    LaunchedEffect(mapLoaded, state.destination, grid, tileProviders) {
+    LaunchedEffect(tileOverlaysAttached, state.destination, grid, tileProviders) {
         // TileOverlayState is attached only after TileOverlay enters the map
         // composition. Clearing it before that point throws and crashes the
-        // app when weather data arrives before Maps finishes loading.
-        if (!mapLoaded || state.destination != AppDestination.NOW) return@LaunchedEffect
+        // app when weather data arrives before the map composition is ready.
+        if (!tileOverlaysAttached || state.destination != AppDestination.NOW) return@LaunchedEffect
         val providers = tileProviders ?: return@LaunchedEffect
         val targetGrid = grid ?: return@LaunchedEffect
         if (displayedGrid === targetGrid) {
@@ -794,8 +769,8 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         withContext(Dispatchers.Default) { frontProvider.preloadGrid(targetGrid) }
         currentCoroutineContext().ensureActive()
         backProvider.updateGrid(targetGrid)
-        if (backTileSlot == 0) firstTileOverlayState.clearTileCache()
-        else secondTileOverlayState.clearTileCache()
+        if (backTileSlot == 0) firstTileLayerState.clearTileCache()
+        else secondTileLayerState.clearTileCache()
         delay(TILE_BACK_BUFFER_SETTLE_MILLIS)
 
         tileBlend.snapTo(0f)
@@ -827,94 +802,78 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         state.selectedMinute.toFloat()
     }
     var lastCameraTarget by remember { mutableStateOf(state.target) }
-
-    Box(modifier) {
-        GoogleMap(
-            modifier = Modifier.fillMaxSize(),
-            cameraPositionState = cameraState,
-            googleMapOptionsFactory = {
-                GoogleMapOptions().apply {
-                    if (!usesBundledMapStyle) {
-                        mapId(configuredMapId)
-                    }
-                }
-            },
-            properties = MapProperties(mapStyleOptions = fallbackStyle),
-            contentPadding = PaddingValues(bottom = mapBottomContentPadding),
-            uiSettings = MapUiSettings(
-                zoomControlsEnabled = false,
-                mapToolbarEnabled = false,
-                rotationGesturesEnabled = false,
-                tiltGesturesEnabled = false,
-            ),
-            onMapLongClick = { viewModel.selectTarget(GeoPoint(it.latitude, it.longitude)) },
-            onMapLoaded = { mapLoaded = true },
-        ) {
-            MapEffect(state.target, recenterRequest) { googleMap ->
-                val targetChanged = state.target != lastCameraTarget
-                val requestedPoint = recenterRequest ?: state.target.coordinate.takeIf { targetChanged }
-                lastCameraTarget = state.target
-                if (requestedPoint == null) return@MapEffect
-                val targetZoom = if (recenterRequest != null || state.target.isDeviceLocation) {
-                    DEFAULT_MAP_ZOOM
-                } else cameraState.position.zoom.coerceAtLeast(10f)
-                val current = googleMap.cameraPosition
-                val needsMove = abs(current.target.latitude - requestedPoint.latitude) > .00001 ||
-                    abs(current.target.longitude - requestedPoint.longitude) > .00001 ||
-                    abs(current.zoom - targetZoom) > .01f
-                if (needsMove) {
-                    googleMap.animateCamera(
-                        CameraUpdateFactory.newLatLngZoom(
-                            LatLng(requestedPoint.latitude, requestedPoint.longitude),
-                            targetZoom,
-                        ),
-                        650,
-                        null,
-                    )
-                }
-                recenterRequest = null
-            }
-            if (mapLoaded && tileProviders != null) {
-                TileOverlay(
-                    tileProvider = tileProviders[0],
-                    state = firstTileOverlayState,
+    var cameraRequest by remember { mutableStateOf<MapCameraRequest?>(null) }
+    LaunchedEffect(state.target, recenterRequest) {
+        val targetChanged = state.target != lastCameraTarget
+        val requestedPoint = recenterRequest ?: state.target.coordinate.takeIf { targetChanged }
+        lastCameraTarget = state.target
+        if (requestedPoint == null) return@LaunchedEffect
+        val current = mapCamera.position
+        val targetZoom = if (recenterRequest != null || state.target.isDeviceLocation) {
+            DEFAULT_MAP_ZOOM
+        } else current.zoom.coerceAtLeast(10f)
+        val needsMove = abs(current.center.latitude - requestedPoint.latitude) > .00001 ||
+            abs(current.center.longitude - requestedPoint.longitude) > .00001 ||
+            abs(current.zoom - targetZoom) > .01f
+        if (needsMove) cameraRequest = MapCameraRequest(requestedPoint, targetZoom)
+        recenterRequest = null
+    }
+    val weatherLayers = buildList {
+        if (tileProviders != null) {
+            add(
+                WeatherTileLayer(
+                    key = "now-0",
+                    provider = tileProviders[0],
+                    state = firstTileLayerState,
                     transparency = if (state.destination == AppDestination.NOW) {
                         1f - state.layers.opacity * tileWeights.first
                     } else 1f,
                     fadeIn = false,
-                    zIndex = 2f,
-                )
-                TileOverlay(
-                    tileProvider = tileProviders[1],
-                    state = secondTileOverlayState,
+                ),
+            )
+            add(
+                WeatherTileLayer(
+                    key = "now-1",
+                    provider = tileProviders[1],
+                    state = secondTileLayerState,
                     transparency = if (state.destination == AppDestination.NOW) {
                         1f - state.layers.opacity * tileWeights.second
                     } else 1f,
                     fadeIn = false,
-                    zIndex = 2f,
-                )
-            }
-            if (state.destination == AppDestination.PRECIPITATION && mapLoaded && quantitativeTileProvider != null) {
-                TileOverlay(
-                    tileProvider = quantitativeTileProvider,
-                    transparency = 1f - QUANTITATIVE_FORECAST_OPACITY,
-                    fadeIn = true,
-                    zIndex = 2f,
-                )
-            }
-            Marker(
-                state = rememberUpdatedMarkerState(LatLng(state.target.coordinate.latitude, state.target.coordinate.longitude)),
-                title = state.target.displayName,
+                ),
             )
         }
+        if (state.destination == AppDestination.PRECIPITATION && quantitativeTileProvider != null) {
+            add(
+                WeatherTileLayer(
+                    key = "precipitation",
+                    provider = quantitativeTileProvider,
+                    transparency = 1f - QUANTITATIVE_FORECAST_OPACITY,
+                    fadeIn = true,
+                ),
+            )
+        }
+    }
+
+    Box(modifier) {
+        WeatherBaseMap(
+            camera = mapCamera,
+            darkMap = darkMap,
+            target = state.target,
+            cameraRequest = cameraRequest,
+            onCameraRequestHandled = { cameraRequest = null },
+            weatherLayers = weatherLayers,
+            bottomContentPadding = mapBottomContentPadding,
+            onLongPress = { viewModel.selectTarget(it) },
+            onMapLoaded = { mapLoaded = true },
+            onCameraIdle = { viewModel.setMapViewport(center = it.center, zoom = it.zoom) },
+            modifier = Modifier.fillMaxSize(),
+        )
         if (state.destination == AppDestination.NOW && state.layers.windEnabled) {
-            val position = cameraState.position
             WindParticleOverlay(
                 windGrid = state.windGrid,
                 winds = state.winds,
-                mapCenter = GeoPoint(position.target.latitude, position.target.longitude),
-                mapZoom = position.zoom,
-                cameraMoving = cameraState.isMoving,
+                camera = windCamera,
                 darkMap = darkMap,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -942,7 +901,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 viewModel = viewModel,
                 locating = locating,
                 onLocate = locateOrRequestPermission,
-                cameraZoom = cameraState.position.zoom,
+                cameraZoom = { mapCamera.position.zoom },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -962,7 +921,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         AnimatedVisibility(
             visible = state.destination == AppDestination.NOW &&
                 state.layers.primary == PrimaryLayer.RADAR_RAIN &&
-                state.radarCoverage == RadarCoverage.LOCAL && cameraState.position.zoom >= 11f,
+                state.radarCoverage == RadarCoverage.LOCAL && mapCamera.position.zoom >= 11f,
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(
@@ -988,9 +947,12 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                     Spacer(Modifier.width(12.dp))
                     Text(
                         if (mapLoadTimedOut) {
-                            "Google 地圖無法載入\n請確認 Maps SDK、計費與 Android 金鑰限制"
+                            when (configuredMapProvider) {
+                                MapProvider.GOOGLE -> "Google 地圖無法載入\n請確認 Maps SDK、計費與 Android 金鑰限制"
+                                MapProvider.OSM -> "OpenStreetMap 圖磚無法載入\n請確認網路連線與 local.properties 的圖磚網址"
+                            }
                         } else {
-                            "正在載入 Google 地圖…"
+                            "正在載入 ${configuredMapProvider.displayName}…"
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )

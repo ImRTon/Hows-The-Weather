@@ -1,5 +1,18 @@
 # Copy to local.properties. Never commit real keys.
+
+# Base map provider selected at build time: google | osm
+MAP_PROVIDER=google
+
+# Google Maps (MAP_PROVIDER=google)
 MAPS_API_KEY=
 MAP_ID=
+
+# OpenStreetMap raster tiles (MAP_PROVIDER=osm). Placeholders: {z} {x} {y},
+# {s} = subdomain a-d, {r} = "@2x" high-DPI suffix. Defaults use CARTO
+# Positron / Dark Matter, which require the attribution below.
+# OSM_TILE_URL_LIGHT=https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png
+# OSM_TILE_URL_DARK=https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png
+# OSM_TILE_ATTRIBUTION=\u00A9 OpenStreetMap contributors \u00A9 CARTO
+
 CWA_API_KEY=
 MOENV_API_KEY=

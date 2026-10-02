@@ -2,6 +2,7 @@ package com.rton.howstheweather.render
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.util.LruCache
 import com.google.android.gms.maps.model.Tile
@@ -45,10 +46,17 @@ class WeatherTileProvider(
     }
 
     override fun getTile(x: Int, y: Int, zoom: Int): Tile {
+        val bytes = tilePng(x, y, zoom) ?: return TileProvider.NO_TILE
+        return Tile(TILE_SIZE, TILE_SIZE, bytes)
+    }
+
+    /** PNG bytes for a Web Mercator z/x/y tile, or null when the tile is fully transparent. */
+    fun tilePng(x: Int, y: Int, zoom: Int): ByteArray? {
         val frameGrid = grid
-        if (!intersectsGrid(frameGrid, x, y, zoom)) return TileProvider.NO_TILE
+        if (!intersectsGrid(frameGrid, x, y, zoom)) return null
         rememberTile(TileCoordinate(x, y, zoom))
-        return Tile(TILE_SIZE, TILE_SIZE, tileBytes(frameGrid, x, y, zoom))
+        val bytes = tileBytes(frameGrid, x, y, zoom)
+        return bytes.takeUnless { it === EMPTY_TILE }
     }
 
     private fun tileBytes(grid: WeatherGrid, x: Int, y: Int, zoom: Int): ByteArray {
@@ -79,13 +87,13 @@ class WeatherTileProvider(
 
     private fun renderTile(grid: WeatherGrid, x: Int, y: Int, zoom: Int): ByteArray {
         val renderSize = TILE_SIZE
-        val bitmap = Bitmap.createBitmap(renderSize, renderSize, Bitmap.Config.ARGB_8888)
         val values = if (style.contours.isNotEmpty()) {
             Array(renderSize + CONTOUR_GUTTER * 2) {
                 FloatArray(renderSize + CONTOUR_GUTTER * 2) { Float.NaN }
             }
         } else null
         val pixels = IntArray(renderSize * renderSize)
+        var anyVisible = false
         val n = 2.0.pow(zoom)
         val sampleSize = values?.size ?: renderSize
         val sampleOffset = if (values == null) 0 else -CONTOUR_GUTTER
@@ -100,20 +108,30 @@ class WeatherTileProvider(
         }
         if (values != null) {
             for (py in values.indices) for (px in values[py].indices) {
-                val value = grid.sample(latitudes[py], longitudes[px]) ?: Float.NaN
+                val value = grid.sampleOrNaN(latitudes[py], longitudes[px])
                 values[py][px] = value
             }
         }
         for (py in 0 until renderSize) {
             for (px in 0 until renderSize) {
                 val value = if (values == null) {
-                    grid.sample(latitudes[py], longitudes[px]) ?: Float.NaN
+                    grid.sampleOrNaN(latitudes[py], longitudes[px])
                 } else {
                     values[py + CONTOUR_GUTTER][px + CONTOUR_GUTTER]
                 }
-                pixels[py * renderSize + px] = style.colorFor(value)
+                val color = style.colorFor(value)
+                if (color != Color.TRANSPARENT) anyVisible = true
+                pixels[py * renderSize + px] = color
             }
         }
+        // Most of the radar domain is dry most of the time. A contour needs one
+        // sample at or above its threshold, so a tile with neither is empty and
+        // can skip bitmap allocation and PNG encoding entirely.
+        val hasContour = values != null && style.contours.minOrNull()?.let { lowest ->
+            values.any { row -> row.any { it.isFinite() && it >= lowest } }
+        } == true
+        if (!anyVisible && !hasContour) return EMPTY_TILE
+        val bitmap = Bitmap.createBitmap(renderSize, renderSize, Bitmap.Config.ARGB_8888)
         bitmap.setPixels(pixels, 0, renderSize, 0, 0, renderSize, renderSize)
         if (values != null) drawContours(bitmap, values, renderSize)
         val bytes = ByteArrayOutputStream().use {
@@ -184,9 +202,11 @@ class WeatherTileProvider(
         private const val RENDERER_VERSION = 2
         private const val CACHE_BYTES = 24 * 1024 * 1024
         private const val MAX_RECENT_TILES = 16
+        private val EMPTY_TILE = ByteArray(0)
         private val renderLocks = ConcurrentHashMap<String, Any>()
         private val tileCache = object : LruCache<String, ByteArray>(CACHE_BYTES) {
-            override fun sizeOf(key: String, value: ByteArray): Int = value.size
+            // Count the key and entry overhead so cached empty tiles stay bounded.
+            override fun sizeOf(key: String, value: ByteArray): Int = value.size + key.length * 2 + 64
         }
     }
 

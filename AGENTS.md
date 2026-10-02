@@ -27,6 +27,8 @@ The decision card leads with one plain-language conclusion, followed by source t
 ### Map experience
 
 - Default target is Taipei until device location is granted; long-pressing the map selects another target.
+- The base map is chosen at build time with `MAP_PROVIDER` (`google` default, or `osm`) in `local.properties`. There is no in-app switch. `PersistentWeatherMap` stays provider-neutral through `WeatherBaseMap`; SDK-specific code lives only in `GoogleWeatherMap.kt` and `OsmWeatherMap.kt`, and both consume the same `WeatherTileProvider` tiles.
+- The OSM backend (osmdroid) uses `tilesScaledToDpi` so its zoom numbers match Google's 256 dp world, keeps the configured tile attribution visible, and uses separate light/dark tile URLs instead of recoloring tiles.
 - The target marker, decision card, selected weather grid, and time control must always refer to the same location and effective time.
 - Primary layers are mutually exclusive:
   - `降雨雷達`: official numerical radar at “now,” official one-hour accumulated rainfall for the future product.

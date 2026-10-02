@@ -127,13 +127,18 @@ data class WindGrid(
         )
     }
 
-    private fun projection() = LambertConformalProjection(
-        earthRadiusMeters,
-        latitudeOfOriginDegrees,
-        centralLongitudeDegrees,
-        firstStandardParallelDegrees,
-        secondStandardParallelDegrees,
-    )
+    // Sampling runs once per wind particle; build the cone constants only once per grid.
+    private val cachedProjection by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        LambertConformalProjection(
+            earthRadiusMeters,
+            latitudeOfOriginDegrees,
+            centralLongitudeDegrees,
+            firstStandardParallelDegrees,
+            secondStandardParallelDegrees,
+        )
+    }
+
+    private fun projection() = cachedProjection
 }
 
 private const val GRID_EDGE_EPSILON = 1e-6
