@@ -88,6 +88,18 @@ class ForecastOverviewTest {
     }
 
     @Test
+    fun aqiLevelsUseEqualWidthCategorySegments() {
+        assertEquals(0f, aqiLevelFraction(0), 1e-4f)
+        assertEquals(1f / 6f, aqiLevelFraction(50), 1e-4f)
+        assertEquals(1.5f / 6f, aqiLevelFraction(75), 1e-4f)
+        assertEquals(5f / 6f, aqiLevelFraction(300), 1e-4f)
+        assertEquals(1f, aqiLevelFraction(800), 1e-4f)
+        assertEquals(0, aqiLevelIndex(42))
+        assertEquals(2, aqiLevelIndex(120))
+        assertEquals(5, aqiLevelIndex(500))
+    }
+
+    @Test
     fun flatPhoneKeepsRainFallingDownTheScreen() {
         val fall = precipitationFallVector(0f, 0f, null, null)
         assertEquals(1f, fall.y, 1e-4f)

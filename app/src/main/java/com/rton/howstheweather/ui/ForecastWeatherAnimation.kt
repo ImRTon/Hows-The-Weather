@@ -181,7 +181,7 @@ private fun rememberDisplayGravity(enabled: Boolean): GravityReading {
 }
 
 @Composable
-private fun rememberReduceMotion(): Boolean {
+internal fun rememberReduceMotion(): Boolean {
     val context = LocalContext.current
     return remember(context) {
         Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f

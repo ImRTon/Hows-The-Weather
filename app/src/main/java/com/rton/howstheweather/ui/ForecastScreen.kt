@@ -55,9 +55,11 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -309,40 +311,65 @@ private fun AirQualityCard(
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
-        Row(
-            Modifier.padding(16.dp).heightIn(min = 48.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            when {
-                loading -> {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Text("正在取得鄰近測站 AQI")
-                }
-                observation != null -> {
-                    val color = aqiColor(observation.aqi)
-                    Box(
-                        Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .background(color.copy(alpha = .16f)),
-                        contentAlignment = Alignment.Center,
+        when {
+            loading -> Row(
+                Modifier.padding(16.dp).heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
+                Text("正在取得鄰近測站 AQI")
+            }
+            observation != null -> {
+                val color = aqiColor(observation.aqi)
+                val level = aqiLevelIndex(observation.aqi)
+                Box(
+                    Modifier.clearAndSetSemantics {
+                        contentDescription = buildString {
+                            append("空氣品質指標 ").append(observation.aqi).append("，").append(observation.status)
+                            append("，為 ").append(AQI_LEVEL_COUNT).append(" 級中的第 ").append(level + 1).append(" 級；")
+                            append(observation.stationName).append("測站")
+                            observation.primaryPollutant?.let { append("，指標污染物 ").append(it) }
+                            append("，觀測時間 ").append(timeFormatter.format(observation.observedAt))
+                        }
+                        progressBarRangeInfo = ProgressBarRangeInfo(
+                            observation.aqi.toFloat().coerceAtMost(AQI_SCALE_MAXIMUM.toFloat()),
+                            0f..AQI_SCALE_MAXIMUM.toFloat(),
+                        )
+                    },
+                ) {
+                    AirQualityLevelFill(
+                        aqi = observation.aqi,
+                        color = color,
+                        modifier = Modifier.matchParentSize(),
+                    )
+                    Column(
+                        Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 18.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        Text(
-                            "${observation.aqi}",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = color,
-                        )
-                    }
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            "AQI · ${observation.status}",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = color,
-                        )
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(
+                                "${observation.aqi}",
+                                style = MaterialTheme.typography.displaySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                observation.status,
+                                modifier = Modifier.padding(bottom = 6.dp),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = color,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "觀測 ${timeFormatter.format(observation.observedAt)}",
+                                modifier = Modifier.padding(bottom = 8.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         Text(
                             buildString {
                                 append(observation.stationName).append("測站")
@@ -351,18 +378,16 @@ private fun AirQualityCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Text(
-                            "觀測 ${timeFormatter.format(observation.observedAt)} · 非空品預報",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                     }
                 }
-                else -> {
-                    Icon(Icons.Default.Air, null, modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.width(12.dp))
-                    Text(unavailableReason ?: "AQI 暫無資料", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+            }
+            else -> Row(
+                Modifier.padding(16.dp).heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Air, null, modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(12.dp))
+                Text(unavailableReason ?: "AQI 暫無資料", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -376,16 +401,19 @@ private fun HourlyForecastTimeline(periods: List<AreaForecastPeriod>, now: Insta
     val currentIndex = periods.indexOfFirst { !it.startAt.isAfter(now) && it.endAt.isAfter(now) }
     val cardColor = MaterialTheme.colorScheme.surfaceVariant
     val highlightColor = MaterialTheme.colorScheme.primary.copy(alpha = .12f)
+    // Equal inset on all sides keeps the highlight's corners concentric with the card's.
+    val cardRadius = 20.dp
+    val highlightInset = 8.dp
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(cardRadius),
         color = cardColor,
     ) {
         Row(
             Modifier
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp, vertical = 12.dp),
+                .padding(highlightInset),
         ) {
             Box(Modifier.width(timelineWidth)) {
                 Row(Modifier.matchParentSize(), horizontalArrangement = Arrangement.spacedBy(itemGap)) {
@@ -394,7 +422,7 @@ private fun HourlyForecastTimeline(periods: List<AreaForecastPeriod>, now: Insta
                             Modifier
                                 .width(itemWidth)
                                 .fillMaxHeight()
-                                .clip(RoundedCornerShape(16.dp))
+                                .clip(RoundedCornerShape(cardRadius - highlightInset))
                                 .background(if (index == currentIndex) highlightColor else Color.Transparent),
                         )
                     }
@@ -447,7 +475,7 @@ private fun HourlyForecastTop(
     val dateLabel = relativeDayLabel(period.startAt, now, zone)
     Column(
         modifier = modifier
-            .padding(top = 6.dp)
+            .padding(top = 10.dp)
             .clearAndSetSemantics {
                 contentDescription = "${forecastDateLabel(period.startAt, zone)} ${timeFormatter.format(period.startAt)}，$description，${temperatureRange(period)}，降雨機率${period.precipitationProbabilityPercent?.let { "${it}%" } ?: "未知"}，濕度${period.relativeHumidityPercent?.let { "${it}%" } ?: "未知"}"
             },
@@ -478,7 +506,7 @@ private fun HourlyForecastTop(
 @Composable
 private fun HourlyForecastBottom(period: AreaForecastPeriod, modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier.padding(bottom = 6.dp).clearAndSetSemantics { },
+        modifier = modifier.padding(bottom = 10.dp).clearAndSetSemantics { },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
