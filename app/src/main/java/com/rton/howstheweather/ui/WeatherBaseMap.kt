@@ -1,11 +1,16 @@
 package com.rton.howstheweather.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import com.rton.howstheweather.BuildConfig
 import com.rton.howstheweather.domain.GeoPoint
@@ -86,6 +91,8 @@ internal data class WeatherTileLayer(
     val fadeIn: Boolean,
     val state: WeatherTileLayerState? = null,
     val zIndex: Float = 2f,
+    /** Invisible overlays stay attached but request no tiles from their provider. */
+    val visible: Boolean = true,
 )
 
 @Composable
@@ -102,6 +109,22 @@ internal fun WeatherBaseMap(
     onCameraIdle: (MapCameraPosition) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Creating the base map is the most expensive step of startup: Google Maps
+    // loads its SDK module on the main thread. Let the decision card draw first,
+    // then warm up the SDK and create the map view in separate frames so no single
+    // frame carries all of that work.
+    val context = LocalContext.current
+    var deferredCreation by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        if (configuredMapProvider == MapProvider.GOOGLE) warmUpGoogleMaps(context.applicationContext)
+        withFrameNanos { }
+        deferredCreation = false
+    }
+    if (deferredCreation) {
+        Box(modifier)
+        return
+    }
     when (configuredMapProvider) {
         MapProvider.GOOGLE -> GoogleWeatherMap(
             camera = camera,

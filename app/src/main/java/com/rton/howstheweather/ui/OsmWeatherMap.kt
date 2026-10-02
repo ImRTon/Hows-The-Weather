@@ -251,6 +251,7 @@ private class OsmWeatherOverlays(private val context: Context, private val mapVi
             } else existing
             overlay.bindState(layer.state)
             overlay.setAlpha(1f - layer.transparency)
+            overlay.setVisible(layer.visible)
         }
         if (orderChanged) {
             val all = mapView.overlays
@@ -296,6 +297,12 @@ private class OsmWeatherOverlay(context: Context, private val mapView: MapView, 
         overlay.setColorFilter(
             ColorMatrixColorFilter(ColorMatrix().apply { setScale(1f, 1f, 1f, clamped) }),
         )
+        mapView.invalidate()
+    }
+
+    fun setVisible(value: Boolean) {
+        if (overlay.isEnabled == value) return
+        overlay.isEnabled = value
         mapView.invalidate()
     }
 

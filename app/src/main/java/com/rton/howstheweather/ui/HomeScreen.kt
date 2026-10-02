@@ -16,7 +16,10 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -252,8 +255,15 @@ private fun WeatherWorkspace(
         }
         var dragFraction by remember(state.panelAnchor, totalHeight) { mutableFloatStateOf(fraction(state.panelAnchor)) }
         var dragging by remember { mutableStateOf(false) }
+        // Restoring the persisted anchor at startup must not animate: every
+        // animation frame resizes the map view, which stutters while it loads.
+        var userMovedPanel by remember { mutableStateOf(false) }
         val targetHeight = bounds.clampDecisionHeight(bounds.totalHeight * dragFraction).dp
-        val animatedHeight by animateDpAsState(targetValue = targetHeight, label = "decision-panel")
+        val animatedHeight by animateDpAsState(
+            targetValue = targetHeight,
+            animationSpec = if (userMovedPanel) spring(visibilityThreshold = Dp.VisibilityThreshold) else snap(),
+            label = "decision-panel",
+        )
         val displayedHeight = bounds.clampDecisionHeight(
             (if (dragging) targetHeight else animatedHeight).value,
         ).dp
@@ -295,7 +305,10 @@ private fun WeatherWorkspace(
                         .zIndex(1f),
                 )
                 PanelHandle(
-                    onClick = viewModel::cyclePanel,
+                    onClick = {
+                        userMovedPanel = true
+                        viewModel.cyclePanel()
+                    },
                     visualHeight = actualHandleVisualHeight,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -306,7 +319,10 @@ private fun WeatherWorkspace(
                         .draggable(
                             state = dragState,
                             orientation = Orientation.Vertical,
-                            onDragStarted = { dragging = true },
+                            onDragStarted = {
+                                userMovedPanel = true
+                                dragging = true
+                            },
                             onDragStopped = {
                                 dragging = false
                                 val nearest = PanelAnchor.entries.minBy { abs(fraction(it) - dragFraction) }
@@ -635,6 +651,9 @@ private fun weatherIconColor(description: String): Color = when {
 private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val mapCamera = remember { WeatherMapCameraState(MapCameraPosition(state.mapCenter, state.mapZoom)) }
+    // The camera changes every frame while panning or animating. Derive the one
+    // threshold composition needs so the whole map subtree does not recompose.
+    val streetLevel by remember(mapCamera) { derivedStateOf { mapCamera.position.zoom >= 11f } }
     val fused = remember { LocationServices.getFusedLocationProviderClient(context) }
     var locating by remember { mutableStateOf(false) }
     var recenterRequest by remember { mutableStateOf<GeoPoint?>(null) }
@@ -745,6 +764,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     var timelineFromMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
     var timelineToMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
     val tileBlend = remember(grid?.unit, renderTheme) { Animatable(0f) }
+    var backBufferVisible by remember(grid?.unit, renderTheme) { mutableStateOf(false) }
     LaunchedEffect(tileOverlaysAttached, state.destination, grid, tileProviders) {
         // TileOverlayState is attached only after TileOverlay enters the map
         // composition. Clearing it before that point throws and crashes the
@@ -752,7 +772,13 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         if (!tileOverlaysAttached || state.destination != AppDestination.NOW) return@LaunchedEffect
         val providers = tileProviders ?: return@LaunchedEffect
         val targetGrid = grid ?: return@LaunchedEffect
-        if (displayedGrid === targetGrid) {
+        val shown = displayedGrid
+        if (shown === targetGrid || (shown != null && shown.rendersSameFrameAs(targetGrid))) {
+            // Startup applies the cached, critical, and enriched snapshots in quick
+            // succession, often with an identical frame. Re-rendering and clearing
+            // the map's tile cache for those would only add work and flicker.
+            providers[frontTileSlot].updateGrid(targetGrid)
+            displayedGrid = targetGrid
             displayedMinute = state.selectedMinute
             timelineFromMinute = state.selectedMinute
             timelineToMinute = state.selectedMinute
@@ -771,6 +797,10 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         backProvider.updateGrid(targetGrid)
         if (backTileSlot == 0) firstTileLayerState.clearTileCache()
         else secondTileLayerState.clearTileCache()
+        backBufferVisible = true
+        // Let the visibility change reach the map before the settle period starts.
+        withFrameNanos { }
+        withFrameNanos { }
         delay(TILE_BACK_BUFFER_SETTLE_MILLIS)
 
         tileBlend.snapTo(0f)
@@ -788,6 +818,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             tileBlend.snapTo(1f)
         }
         frontTileSlot = backTileSlot
+        backBufferVisible = false
         displayedGrid = targetGrid
         displayedMinute = state.selectedMinute
         timelineFromMinute = state.selectedMinute
@@ -829,6 +860,8 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                         1f - state.layers.opacity * tileWeights.first
                     } else 1f,
                     fadeIn = false,
+                    visible = state.destination == AppDestination.NOW &&
+                        (frontTileSlot == 0 || backBufferVisible),
                 ),
             )
             add(
@@ -840,6 +873,8 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                         1f - state.layers.opacity * tileWeights.second
                     } else 1f,
                     fadeIn = false,
+                    visible = state.destination == AppDestination.NOW &&
+                        (frontTileSlot == 1 || backBufferVisible),
                 ),
             )
         }
@@ -921,7 +956,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         AnimatedVisibility(
             visible = state.destination == AppDestination.NOW &&
                 state.layers.primary == PrimaryLayer.RADAR_RAIN &&
-                state.radarCoverage == RadarCoverage.LOCAL && mapCamera.position.zoom >= 11f,
+                state.radarCoverage == RadarCoverage.LOCAL && streetLevel,
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(
@@ -1029,6 +1064,18 @@ private const val DEVICE_LOCATION_REFRESH_THRESHOLD_METERS = 100.0
 private const val EARTH_RADIUS_METERS = 6_371_000.0
 
 internal data class TileBlendWeights(val first: Float, val second: Float)
+
+/**
+ * True when two grids render identical tiles. Mirrors the identity used by the
+ * tile cache key and the view model's presented-frame key.
+ */
+internal fun WeatherGrid.rendersSameFrameAs(other: WeatherGrid): Boolean =
+    sourceId == other.sourceId &&
+        validAt == other.validAt &&
+        unit == other.unit &&
+        width == other.width &&
+        height == other.height &&
+        bounds == other.bounds
 
 internal fun tileBlendWeights(frontSlot: Int, progress: Float): TileBlendWeights {
     require(frontSlot == 0 || frontSlot == 1)

@@ -2,6 +2,7 @@
 
 package com.rton.howstheweather.ui
 
+import android.content.Context
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -17,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMapOptions
+import com.google.android.gms.maps.MapsInitializer
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.MapStyleOptions
@@ -34,6 +36,11 @@ import com.rton.howstheweather.R
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.TargetLocation
 import kotlinx.coroutines.flow.filter
+
+/** Loads the Maps SDK module ahead of the first map view; repeated calls are cheap. */
+internal fun warmUpGoogleMaps(context: Context) {
+    MapsInitializer.initialize(context, MapsInitializer.Renderer.LATEST, null)
+}
 
 @Composable
 internal fun GoogleWeatherMap(
@@ -128,6 +135,7 @@ internal fun GoogleWeatherMap(
                     transparency = layer.transparency,
                     fadeIn = layer.fadeIn,
                     zIndex = layer.zIndex,
+                    visible = layer.visible,
                 )
                 val layerState = layer.state
                 if (layerState != null) {
