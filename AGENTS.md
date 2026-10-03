@@ -14,10 +14,12 @@ The home screen is one vertically split workspace:
 
 - The upper panel is the decision card.
 - The lower panel is the interactive Google map.
-- A 48 dp accessible drag handle continuously resizes the panels and settles at three anchors:
-  - `Decision`: decision card receives about 48% of available height, enough for the expanded content without a large empty spacer.
-  - `Balanced`: decision card receives about 30%, closely wrapping the three priority forecast cards.
-  - `Map`: decision card collapses to an approximately 48 dp one-line summary, with the rain probability aligned to the right.
+- A 48 dp accessible drag handle (and the decision card itself) continuously resizes the panels and settles at three anchors. Anchor heights are measured from the card content, not screen fractions, so every device wraps the same content without device-dependent padding; each is capped so the map keeps at least 180 dp:
+  - `Decision`: exactly fits the expanded content (headline, priority cards, 12-hour strip, current observation).
+  - `Balanced`: exactly fits the headline and the three priority forecast cards.
+  - `Map`: decision card collapses to a 48 dp one-line summary, with the rain probability aligned to the right.
+- Release physics: a slow release springs to the nearest anchor; a fling advances at least one anchor in its direction and may skip further when its decay projection reaches it. The settle spring inherits the release velocity, and a new touch interrupts it in place.
+- Drag and settle frames must not recompose the map: read the live panel height only in layout/draw lambdas. Summary/expanded content crossfades from the live height rather than switching at anchors.
 - Tapping the handle cycles through the same anchors.
 - Keep the visual divider between the decision card and map continuous across the full width; the short drag bar overlays that divider without creating a black gap.
 - Preserve the selected anchor and theme through state restoration.

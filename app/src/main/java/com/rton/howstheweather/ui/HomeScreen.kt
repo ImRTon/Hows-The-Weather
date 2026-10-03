@@ -12,21 +12,24 @@ import android.location.Location
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.calculateTargetValue
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.MarqueeSpacing
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.Orientation
@@ -41,19 +44,30 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -231,60 +245,142 @@ private fun WeatherWorkspace(
 ) {
     BoxWithConstraints(modifier) {
         val density = LocalDensity.current
-        val totalHeight = maxHeight
-        val handleTouchHeight = 48.dp
-        val handleVisualHeight = 8.dp
-        val minCard = 48.dp
-        val minMap = 180.dp
-        val bounds = calculateResizablePanelBounds(
-            totalHeight = totalHeight.value,
-            preferredMinDecisionHeight = minCard.value,
-            preferredMinMapHeight = minMap.value,
-            preferredHandleHeight = handleVisualHeight.value,
-            handleTouchHeight = handleTouchHeight.value,
-        )
-        val actualHandleVisualHeight = bounds.handleHeight.dp
-        fun fraction(anchor: PanelAnchor) = when (anchor) {
-            PanelAnchor.DECISION -> 0.48f
-            PanelAnchor.BALANCED -> 0.30f
-            PanelAnchor.MAP -> if (bounds.totalHeight > 0f) {
-                bounds.minDecisionHeight / bounds.totalHeight
-            } else {
-                0f
+        val haptics = LocalHapticFeedback.current
+        val bounds = with(density) {
+            calculateResizablePanelBounds(
+                totalHeight = constraints.maxHeight.toFloat(),
+                preferredMinDecisionHeight = PANEL_COLLAPSED_HEIGHT.toPx(),
+                preferredMinMapHeight = PANEL_MIN_MAP_HEIGHT.toPx(),
+                preferredHandleHeight = PANEL_DIVIDER_HEIGHT.toPx(),
+                handleTouchHeight = PANEL_HANDLE_TOUCH_HEIGHT.toPx(),
+            )
+        }
+        val handleTouchPx = with(density) { PANEL_HANDLE_TOUCH_HEIGHT.toPx() }
+        val dividerHeight = with(density) { bounds.handleHeight.toDp() }
+
+        // Anchors wrap the measured decision content, so every device gets the
+        // same content-fitted panel instead of a screen-fraction with padding.
+        var headerPx by remember { mutableIntStateOf(0) }
+        var priorityPx by remember { mutableIntStateOf(0) }
+        var expandedPx by remember { mutableIntStateOf(0) }
+        val anchors = remember(bounds, headerPx, priorityPx, expandedPx, density) {
+            if (headerPx == 0 || priorityPx == 0 || expandedPx == 0) {
+                null
+            } else with(density) {
+                calculatePanelAnchorHeights(
+                    bounds = bounds,
+                    collapsedHeight = PANEL_COLLAPSED_HEIGHT.toPx(),
+                    balancedContentHeight = PANEL_CONTENT_TOP_PADDING.toPx() + headerPx +
+                        PANEL_CONTENT_SPACING.toPx() + priorityPx + PANEL_CONTENT_BOTTOM_PADDING.toPx(),
+                    expandedContentHeight = expandedPx.toFloat(),
+                )
             }
         }
-        var dragFraction by remember(state.panelAnchor, totalHeight) { mutableFloatStateOf(fraction(state.panelAnchor)) }
-        var dragging by remember { mutableStateOf(false) }
+
+        // The live height is read only in layout/draw lambdas so dragging and
+        // settling never recompose the map subtree.
+        val panelHeight = remember { mutableFloatStateOf(Float.NaN) }
+        val motion = remember { PanelMotion() }
         // Restoring the persisted anchor at startup must not animate: every
         // animation frame resizes the map view, which stutters while it loads.
         var userMovedPanel by remember { mutableStateOf(false) }
-        val targetHeight = bounds.clampDecisionHeight(bounds.totalHeight * dragFraction).dp
-        val animatedHeight by animateDpAsState(
-            targetValue = targetHeight,
-            animationSpec = if (userMovedPanel) spring(visibilityThreshold = Dp.VisibilityThreshold) else snap(),
-            label = "decision-panel",
-        )
-        val displayedHeight = bounds.clampDecisionHeight(
-            (if (dragging) targetHeight else animatedHeight).value,
-        ).dp
-        val handleTouchOffset = (
-            displayedHeight + actualHandleVisualHeight / 2 - handleTouchHeight / 2
-        ).coerceIn(0.dp, bounds.maxHandleTouchOffset.dp)
-        val dragState = rememberDraggableState { amount ->
-            val delta = with(density) { amount.toDp().value }
-            val nextHeight = bounds.clampDecisionHeight(targetHeight.value + delta)
-            dragFraction = if (bounds.totalHeight > 0f) nextHeight / bounds.totalHeight else 0f
+        val currentBounds by rememberUpdatedState(bounds)
+        val dragState = rememberDraggableState { delta ->
+            val current = panelHeight.floatValue
+            if (!current.isNaN()) {
+                panelHeight.floatValue = currentBounds.clampDecisionHeight(current + delta)
+            }
         }
+        val dragInteraction = remember { MutableInteractionSource() }
+        val decay = rememberSplineBasedDecay<Float>()
+        val flingThreshold = with(density) { PANEL_FLING_THRESHOLD.toPx() }
+        val displayedHeight: () -> Float = {
+            panelHeight.floatValue.takeUnless { it.isNaN() }
+                ?: anchors?.heightFor(state.panelAnchor)
+                ?: bounds.minDecisionHeight
+        }
+
+        suspend fun settleTo(anchor: PanelAnchor, heights: PanelAnchorHeights, velocity: Float) {
+            val target = heights.heightFor(anchor)
+            // Default priority yields to a new finger-down, which interrupts the
+            // spring exactly where it is instead of fighting the user.
+            dragState.drag(MutatePriority.Default) {
+                motion.targetPx = target
+                val start = panelHeight.floatValue.takeUnless { it.isNaN() } ?: target
+                animate(
+                    initialValue = start,
+                    targetValue = target,
+                    initialVelocity = velocity,
+                    animationSpec = PanelSettleSpring,
+                ) { value, _ -> dragBy(value - panelHeight.floatValue) }
+            }
+        }
+
+        LaunchedEffect(state.panelAnchor, anchors) {
+            val heights = anchors ?: return@LaunchedEffect
+            val target = heights.heightFor(state.panelAnchor)
+            if (panelHeight.floatValue.isNaN() || !userMovedPanel) {
+                panelHeight.floatValue = target
+                motion.targetPx = target
+                return@LaunchedEffect
+            }
+            // A released fling is already springing toward this anchor with its
+            // own velocity; restarting here would make it stall.
+            if (abs(motion.targetPx - target) < 0.5f && !panelHeight.floatValue.isNaN()) {
+                if (abs(panelHeight.floatValue - target) < 0.5f || motion.settling > 0) return@LaunchedEffect
+            }
+            motion.settling++
+            try {
+                settleTo(state.panelAnchor, heights, 0f)
+            } finally {
+                motion.settling--
+            }
+        }
+
+        val panelDrag = Modifier.draggable(
+            state = dragState,
+            orientation = Orientation.Vertical,
+            interactionSource = dragInteraction,
+            onDragStarted = {
+                userMovedPanel = true
+                motion.targetPx = Float.NaN
+            },
+            onDragStopped = { velocity ->
+                val heights = anchors ?: return@draggable
+                val current = panelHeight.floatValue.takeUnless { it.isNaN() } ?: return@draggable
+                val target = resolvePanelSettleAnchor(
+                    anchors = heights,
+                    currentHeight = current,
+                    velocity = velocity,
+                    projectedHeight = decay.calculateTargetValue(current, velocity),
+                    velocityThreshold = flingThreshold,
+                )
+                motion.targetPx = heights.heightFor(target)
+                motion.settling++
+                if (target != state.panelAnchor) {
+                    haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                }
+                viewModel.setPanel(target)
+                try {
+                    settleTo(target, heights, velocity)
+                } finally {
+                    motion.settling--
+                }
+            },
+        )
 
         val mapModifier = when (state.destination) {
             AppDestination.NOW -> Modifier
                 .fillMaxWidth()
-                .offset(y = displayedHeight + actualHandleVisualHeight)
-                .height(
-                    (bounds.totalHeight - displayedHeight.value - bounds.handleHeight)
-                        .coerceAtLeast(0f)
-                        .dp,
-                )
+                .layout { measurable, constraints ->
+                    val top = (displayedHeight() + bounds.handleHeight).roundToInt()
+                        .coerceIn(0, constraints.maxHeight)
+                    val height = constraints.maxHeight - top
+                    val placeable = measurable.measure(
+                        constraints.copy(minHeight = height, maxHeight = height),
+                    )
+                    layout(placeable.width, constraints.maxHeight) { placeable.place(0, top) }
+                }
             AppDestination.PRECIPITATION,
             AppDestination.FORECAST -> Modifier.fillMaxSize()
         }
@@ -294,51 +390,92 @@ private fun WeatherWorkspace(
             if (state.destination == AppDestination.NOW) {
                 DecisionPanel(
                     state = state,
-                    modifier = Modifier.fillMaxWidth().height(displayedHeight),
+                    anchors = anchors,
+                    panelHeight = displayedHeight,
+                    onHeaderMeasured = { headerPx = it },
+                    onPriorityMeasured = { priorityPx = it },
+                    onExpandedMeasured = { expandedPx = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .layout { measurable, constraints ->
+                            val height = displayedHeight().roundToInt().coerceIn(0, constraints.maxHeight)
+                            val placeable = measurable.measure(
+                                constraints.copy(minHeight = height, maxHeight = height),
+                            )
+                            layout(placeable.width, height) { placeable.place(0, 0) }
+                        }
+                        .then(panelDrag),
                 )
+                val dividerLine = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)
+                val dividerSurface = MaterialTheme.colorScheme.surface
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(actualHandleVisualHeight)
-                        .offset(y = displayedHeight)
-                        .background(MaterialTheme.colorScheme.surface)
-                        .zIndex(1f),
+                        .height(dividerHeight)
+                        .offset { IntOffset(0, displayedHeight().roundToInt()) }
+                        .zIndex(1f)
+                        .drawBehind {
+                            drawRect(dividerSurface)
+                            val line = 1.dp.toPx()
+                            drawRect(
+                                color = dividerLine,
+                                topLeft = Offset(0f, size.height - line),
+                                size = Size(size.width, line),
+                            )
+                        },
                 )
                 PanelHandle(
+                    anchor = state.panelAnchor,
+                    interactionSource = dragInteraction,
                     onClick = {
                         userMovedPanel = true
                         viewModel.cyclePanel()
                     },
-                    visualHeight = actualHandleVisualHeight,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .width(72.dp)
-                        .height(handleTouchHeight)
-                        .offset(y = handleTouchOffset)
-                        .zIndex(1f)
-                        .draggable(
-                            state = dragState,
-                            orientation = Orientation.Vertical,
-                            onDragStarted = {
-                                userMovedPanel = true
-                                dragging = true
-                            },
-                            onDragStopped = {
-                                dragging = false
-                                val nearest = PanelAnchor.entries.minBy { abs(fraction(it) - dragFraction) }
-                                dragFraction = fraction(nearest)
-                                viewModel.setPanel(nearest)
-                            },
-                        ),
+                        .width(96.dp)
+                        .height(PANEL_HANDLE_TOUCH_HEIGHT)
+                        .offset {
+                            val y = displayedHeight() + bounds.handleHeight / 2f - handleTouchPx / 2f
+                            IntOffset(0, y.coerceIn(0f, bounds.maxHandleTouchOffset).roundToInt())
+                        }
+                        .zIndex(2f)
+                        .then(panelDrag),
                 )
             }
         }
     }
 }
 
+/** Non-observable bookkeeping for the panel spring; never drives composition. */
+private class PanelMotion {
+    var targetPx: Float = Float.NaN
+    var settling: Int = 0
+}
+
+private val PANEL_COLLAPSED_HEIGHT = 48.dp
+private val PANEL_MIN_MAP_HEIGHT = 180.dp
+private val PANEL_DIVIDER_HEIGHT = 8.dp
+private val PANEL_HANDLE_TOUCH_HEIGHT = 48.dp
+private val PANEL_CONTENT_TOP_PADDING = 10.dp
+private val PANEL_CONTENT_BOTTOM_PADDING = 12.dp
+private val PANEL_CONTENT_SPACING = 10.dp
+private val PANEL_FLING_THRESHOLD = 360.dp // per second
+private val PanelSettleSpring = spring<Float>(dampingRatio = 0.86f, stiffness = 420f)
+
 @Composable
-private fun PanelHandle(onClick: () -> Unit, visualHeight: Dp, modifier: Modifier = Modifier) {
-    val interactionSource = remember { MutableInteractionSource() }
+private fun PanelHandle(
+    anchor: PanelAnchor,
+    interactionSource: MutableInteractionSource,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val dragged by interactionSource.collectIsDraggedAsState()
+    val barWidth by animateDpAsState(if (dragged) 44.dp else 32.dp, label = "handle-width")
+    val barColor by animateColorAsState(
+        if (dragged) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = .75f),
+        label = "handle-color",
+    )
     Box(
         modifier = modifier
             .clickable(
@@ -349,33 +486,39 @@ private fun PanelHandle(onClick: () -> Unit, visualHeight: Dp, modifier: Modifie
             .semantics {
                 role = Role.Button
                 contentDescription = "上下拖曳調整決策卡與地圖大小"
+                stateDescription = when (anchor) {
+                    PanelAnchor.DECISION -> "決策卡展開"
+                    PanelAnchor.BALANCED -> "決策卡與地圖平衡"
+                    PanelAnchor.MAP -> "地圖優先"
+                }
                 onClick("切換面板大小") { onClick(); true }
             },
         contentAlignment = Alignment.Center,
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth().height(visualHeight),
-            color = MaterialTheme.colorScheme.surface,
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Box(
-                    Modifier.size(width = 32.dp, height = 3.dp)
-                        .clip(RoundedCornerShape(99.dp))
-                        .background(MaterialTheme.colorScheme.outline.copy(alpha = .75f))
-                        .indication(
-                            interactionSource = interactionSource,
-                            indication = ripple(color = MaterialTheme.colorScheme.primary),
-                        ),
-                )
-            }
-        }
+        Box(
+            Modifier
+                .size(width = barWidth, height = 4.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(barColor)
+                .indication(
+                    interactionSource = interactionSource,
+                    indication = ripple(color = MaterialTheme.colorScheme.primary),
+                ),
+        )
     }
 }
 
 @Composable
-private fun DecisionPanel(state: HomeUiState, modifier: Modifier = Modifier) {
-    val collapsed = state.panelAnchor == PanelAnchor.MAP
-    val expanded = state.panelAnchor == PanelAnchor.DECISION
+private fun DecisionPanel(
+    state: HomeUiState,
+    anchors: PanelAnchorHeights?,
+    panelHeight: () -> Float,
+    onHeaderMeasured: (Int) -> Unit,
+    onPriorityMeasured: (Int) -> Unit,
+    onExpandedMeasured: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val settledCollapsed = state.panelAnchor == PanelAnchor.MAP
     val forecastPeriods = state.areaForecast?.periods.orEmpty()
         .ifEmpty { state.weeklyForecast?.periods.orEmpty() }
     val now = remember(forecastPeriods, state.target.coordinate) { java.time.Instant.now() }
@@ -389,69 +532,128 @@ private fun DecisionPanel(state: HomeUiState, modifier: Modifier = Modifier) {
             .sortedBy(AreaForecastPeriod::startAt)
             .take(4)
     }
-    Surface(modifier, color = MaterialTheme.colorScheme.surface) {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(horizontal = 20.dp, vertical = if (collapsed) 8.dp else 10.dp)
-                .animateContentSize(),
-            verticalArrangement = Arrangement.spacedBy(if (collapsed) 3.dp else 8.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+    // Content alpha follows the live panel height, so the summary and the full
+    // card crossfade continuously under the finger instead of popping at anchors.
+    val summaryProgress: () -> Float = {
+        anchors?.summaryProgress(panelHeight()) ?: if (settledCollapsed) 0f else 1f
+    }
+    val detailProgress: () -> Float = {
+        anchors?.detailProgress(panelHeight()) ?: if (state.panelAnchor == PanelAnchor.DECISION) 1f else 0f
+    }
+    Surface(modifier.clipToBounds(), color = MaterialTheme.colorScheme.surface) {
+        Box(Modifier.fillMaxSize()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .wrapContentHeight(Alignment.Top, unbounded = true)
+                    .onSizeChanged { onExpandedMeasured(it.height) }
+                    .graphicsLayer {
+                        val visible = ((summaryProgress() - .2f) / .5f).coerceIn(0f, 1f)
+                        alpha = visible
+                        translationY = -(1f - visible) * 6.dp.toPx()
+                    }
+                    .then(if (settledCollapsed) Modifier.clearAndSetSemantics { } else Modifier)
+                    .padding(
+                        start = 20.dp,
+                        end = 20.dp,
+                        top = PANEL_CONTENT_TOP_PADDING,
+                        bottom = PANEL_CONTENT_BOTTOM_PADDING,
+                    ),
+                verticalArrangement = Arrangement.spacedBy(PANEL_CONTENT_SPACING),
             ) {
                 Text(
                     state.decision.headline,
                     modifier = Modifier
-                        .weight(1f)
-                        .basicMarquee(
-                            iterations = Int.MAX_VALUE,
-                            repeatDelayMillis = 0,
-                            initialDelayMillis = 0,
-                            spacing = MarqueeSpacing.fractionOfContainer(0.08f),
-                        ),
-                    style = if (collapsed) MaterialTheme.typography.titleMedium else MaterialTheme.typography.headlineSmall,
+                        .fillMaxWidth()
+                        .onSizeChanged { onHeaderMeasured(it.height) }
+                        .decisionMarquee(enabled = !settledCollapsed),
+                    style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Clip,
                 )
-                if (collapsed) {
-                    Spacer(Modifier.width(12.dp))
-                    Icon(
-                        Icons.Default.WaterDrop,
-                        contentDescription = null,
-                        modifier = Modifier.size(15.dp),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        priorityPeriods.firstOrNull()?.precipitationProbabilityPercent?.let { "降雨 $it%" }
-                            ?: "降雨 —",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            if (!collapsed) {
                 PriorityForecastRow(
                     periods = priorityPeriods,
                     loading = state.areaForecastLoading && state.weeklyForecastLoading,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onSizeChanged { onPriorityMeasured(it.height) },
                 )
+                Column(
+                    Modifier.graphicsLayer {
+                        alpha = ((detailProgress() - .1f) / .6f).coerceIn(0f, 1f)
+                    },
+                    verticalArrangement = Arrangement.spacedBy(PANEL_CONTENT_SPACING),
+                ) {
+                    UpcomingRainStrip(upcomingRain, Modifier.fillMaxWidth())
+                    CurrentObservationLine(
+                        observation = state.currentWeather,
+                        loading = state.currentWeatherLoading,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
-            if (expanded) {
-                UpcomingRainStrip(upcomingRain, Modifier.fillMaxWidth())
-                CurrentObservationLine(
-                    observation = state.currentWeather,
-                    loading = state.currentWeatherLoading,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
+            CollapsedDecisionSummary(
+                headline = state.decision.headline,
+                rainProbability = priorityPeriods.firstOrNull()?.precipitationProbabilityPercent,
+                marquee = settledCollapsed,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(PANEL_COLLAPSED_HEIGHT)
+                    .graphicsLayer { alpha = (1f - summaryProgress() / .35f).coerceIn(0f, 1f) }
+                    .then(if (!settledCollapsed) Modifier.clearAndSetSemantics { } else Modifier),
+            )
         }
     }
 }
+
+@Composable
+private fun CollapsedDecisionSummary(
+    headline: String,
+    rainProbability: Int?,
+    marquee: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.padding(horizontal = 20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            headline,
+            modifier = Modifier.weight(1f).decisionMarquee(enabled = marquee),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+        )
+        Spacer(Modifier.width(12.dp))
+        Icon(
+            Icons.Default.WaterDrop,
+            contentDescription = null,
+            modifier = Modifier.size(15.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            rainProbability?.let { "降雨 $it%" } ?: "降雨 —",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private fun Modifier.decisionMarquee(enabled: Boolean): Modifier =
+    if (enabled) {
+        basicMarquee(
+            iterations = Int.MAX_VALUE,
+            repeatDelayMillis = 0,
+            initialDelayMillis = 0,
+            spacing = MarqueeSpacing.fractionOfContainer(0.08f),
+        )
+    } else {
+        this
+    }
 
 @Composable
 private fun PriorityForecastRow(
@@ -461,7 +663,7 @@ private fun PriorityForecastRow(
 ) {
     if (periods.isEmpty()) {
         Surface(
-            modifier = modifier.heightIn(min = 76.dp),
+            modifier = modifier.heightIn(min = 108.dp),
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .42f),
         ) {
