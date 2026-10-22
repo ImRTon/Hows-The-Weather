@@ -95,7 +95,6 @@ class WeatherSnapshotCache(
         val radarFrames = readList(input) { readGrid(input) }
         val radarRegionalFrames = readList(input) { readGrid(input) }
         val forecasts = readList(input) { readGrid(input) }
-        require(forecasts.isNotEmpty()) { "Cached forecast is empty" }
         val quantitativeForecasts = readList(input) { readGrid(input) }
         val clouds = readList(input) { readGrid(input) }
         val regionalClouds = readList(input) { readGrid(input) }

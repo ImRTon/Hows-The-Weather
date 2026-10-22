@@ -4,6 +4,7 @@ import com.rton.howstheweather.domain.ForecastPoint
 import com.rton.howstheweather.domain.AreaForecast
 import com.rton.howstheweather.domain.CurrentWeatherObservation
 import com.rton.howstheweather.domain.GeoPoint
+import com.rton.howstheweather.domain.TropicalCyclone
 import com.rton.howstheweather.domain.WeatherGrid
 import com.rton.howstheweather.domain.WindGrid
 import com.rton.howstheweather.domain.WindObservation
@@ -98,6 +99,9 @@ interface WeatherDataSource {
     fun windUpdates(): Flow<WeatherWindData> = flow {
         emit(loadWind())
     }
+
+    /** Loads currently active tropical cyclones; an empty list means none is active. */
+    suspend fun loadTropicalCyclones(): List<TropicalCyclone> = emptyList()
 
     /** Loads non-decision layers after radar and the official forecast are usable. */
     suspend fun enrich(snapshot: WeatherSnapshot, target: GeoPoint): WeatherSnapshot = snapshot

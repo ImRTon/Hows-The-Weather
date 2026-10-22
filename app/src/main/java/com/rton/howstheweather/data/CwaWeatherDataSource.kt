@@ -5,6 +5,7 @@ import com.rton.howstheweather.domain.ForecastPoint
 import com.rton.howstheweather.domain.AreaForecast
 import com.rton.howstheweather.domain.CurrentWeatherObservation
 import com.rton.howstheweather.domain.GeoPoint
+import com.rton.howstheweather.domain.TropicalCyclone
 import com.rton.howstheweather.domain.WeatherGrid
 import com.rton.howstheweather.domain.WeatherUnit
 import com.rton.howstheweather.domain.WindGrid
@@ -28,13 +29,16 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.Cache
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import java.io.File
 import java.io.IOException
+import java.time.Duration
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
@@ -44,7 +48,11 @@ import kotlin.coroutines.resumeWithException
 
 class CwaWeatherDataSource(
     private val apiKey: String,
-    private val client: OkHttpClient = defaultClient(),
+    client: OkHttpClient = defaultClient(),
+    /** Disk cache for ETag/Last-Modified products (fileapi files on S3, product images). */
+    httpCacheDirectory: File? = null,
+    /** TTL cache for REST products that carry no HTTP validators. */
+    responseCacheDirectory: File? = null,
     private val parser: CwaJsonGridParser = CwaJsonGridParser(),
     private val radarImageParser: CwaRadarImageParser = CwaRadarImageParser(),
     private val quantitativeForecastParser: CwaQuantitativeForecastImageParser = CwaQuantitativeForecastImageParser(),
@@ -56,7 +64,32 @@ class CwaWeatherDataSource(
     private val currentWeatherParser: CwaCurrentWeatherParser = CwaCurrentWeatherParser(),
     private val gribWindParser: CwaGrib2WindParser = CwaGrib2WindParser(),
     private val areaForecastParser: CwaAreaForecastParser = CwaAreaForecastParser(),
+    private val tropicalCycloneParser: CwaTropicalCycloneParser = CwaTropicalCycloneParser(),
 ) : WeatherDataSource {
+    /**
+     * The key travels in the Authorization header, never in the URL, so it is not
+     * written into the HTTP cache journal. OkHttp drops this header itself when
+     * fileapi redirects to the public S3 host.
+     */
+    private val client: OkHttpClient = client.newBuilder()
+        .apply {
+            interceptors().add(0) { chain ->
+                val request = chain.request()
+                chain.proceed(
+                    if (request.url.host == CWA_OPENDATA_HOST && request.header("Authorization") == null) {
+                        request.newBuilder().header("Authorization", apiKey).build()
+                    } else {
+                        request
+                    },
+                )
+            }
+        }
+        .apply { httpCacheDirectory?.let { cache(Cache(it, HTTP_CACHE_MAX_BYTES)) } }
+        .build()
+
+    /** REST bodies have no validators, so storing them in the HTTP cache would only churn the disk. */
+    private val uncachedClient: OkHttpClient = this.client.newBuilder().cache(null).build()
+    private val responseCache = CwaResponseCache(responseCacheDirectory)
     private val historyLoadSemaphore = Semaphore(HISTORY_DOWNLOAD_CONCURRENCY)
     private val quantitativeLoadSemaphore = Semaphore(QUANTITATIVE_DOWNLOAD_CONCURRENCY)
     private val animationCacheMutex = Mutex()
@@ -88,7 +121,6 @@ class CwaWeatherDataSource(
         if (nearbyStationIds.isEmpty()) return null
         val url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/$CURRENT_WEATHER_DATASET_ID".toHttpUrl()
             .newBuilder()
-            .addQueryParameter("Authorization", apiKey)
             .addQueryParameter("format", "JSON")
             .addQueryParameter("StationId", nearbyStationIds.joinToString(","))
             .addQueryParameter("WeatherElement", CURRENT_WEATHER_ELEMENTS)
@@ -121,6 +153,9 @@ class CwaWeatherDataSource(
         )
     }
 
+    override suspend fun loadTropicalCyclones(): List<TropicalCyclone> =
+        fetchRestJson(CwaTropicalCycloneParser.DATASET_ID, TROPICAL_CYCLONE_MAX_AGE, tropicalCycloneParser::parse)
+
     override suspend fun loadRegionalRadar(): WeatherGrid =
         fetchRadarFrame(LOCAL_RADAR_DATASET_ID, RADAR_LOCAL_SAMPLE_SIZE)
 
@@ -138,12 +173,14 @@ class CwaWeatherDataSource(
         val results = candidates.map { (county, datasetId) ->
             async(Dispatchers.IO) {
                 catchingCancellable {
-                    areaForecastParser.nearestForecast(
-                        json = fetchForecastJson(datasetId),
-                        target = target,
-                        sourceId = datasetId,
-                        countyName = county.name,
-                    )
+                    fetchRestJson(datasetId, AREA_FORECAST_MAX_AGE) { json ->
+                        areaForecastParser.nearestForecast(
+                            json = json,
+                            target = target,
+                            sourceId = datasetId,
+                            countyName = county.name,
+                        )
+                    }
                 }
             }
         }.awaitAll()
@@ -171,12 +208,14 @@ class CwaWeatherDataSource(
         val results = candidates.map { (county, datasetId) ->
             async(Dispatchers.IO) {
                 catchingCancellable {
-                    areaForecastParser.nearestWeeklyForecast(
-                        json = fetchForecastJson(datasetId),
-                        target = target,
-                        sourceId = datasetId,
-                        countyName = county.name,
-                    )
+                    fetchRestJson(datasetId, WEEKLY_FORECAST_MAX_AGE) { json ->
+                        areaForecastParser.nearestWeeklyForecast(
+                            json = json,
+                            target = target,
+                            sourceId = datasetId,
+                            countyName = county.name,
+                        )
+                    }
                 }
             }
         }.awaitAll()
@@ -191,9 +230,11 @@ class CwaWeatherDataSource(
     private suspend fun forecastCountyLocations(): List<CwaForecastLocation> {
         countyForecastLocations?.let { return it }
         return countyForecastLocationsMutex.withLock {
-            countyForecastLocations ?: withContext(Dispatchers.IO) {
-                areaForecastParser.locations(fetchForecastJson(NATIONAL_THREE_DAY_FORECAST_ID))
-            }.also { countyForecastLocations = it }
+            countyForecastLocations ?: fetchRestJson(
+                NATIONAL_THREE_DAY_FORECAST_ID,
+                COUNTY_LOCATIONS_MAX_AGE,
+                areaForecastParser::locations,
+            ).also { countyForecastLocations = it }
         }
     }
 
@@ -786,7 +827,6 @@ class CwaWeatherDataSource(
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss").withZone(TAIPEI_ZONE)
         val url = "https://opendata.cwa.gov.tw/historyapi/v1/getMetadata/$datasetId".toHttpUrl()
             .newBuilder()
-            .addQueryParameter("Authorization", apiKey)
             .addQueryParameter("format", "JSON")
             .addQueryParameter("limit", OBSERVATION_HISTORY_FRAME_COUNT.toString())
             .addQueryParameter(
@@ -832,7 +872,6 @@ class CwaWeatherDataSource(
         suspend fun fetch(elementFilter: Boolean): List<WindObservation> {
             val builder = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/$WIND_DATASET_ID".toHttpUrl()
                 .newBuilder()
-                .addQueryParameter("Authorization", apiKey)
                 .addQueryParameter("format", "JSON")
             if (elementFilter) {
                 builder.addQueryParameter("elementName", "WindDirection,WindSpeed")
@@ -853,21 +892,30 @@ class CwaWeatherDataSource(
     private suspend fun fetchBody(datasetId: String, format: String): okhttp3.ResponseBody {
         val url = "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/$datasetId".toHttpUrl()
             .newBuilder()
-            .addQueryParameter("Authorization", apiKey)
             .addQueryParameter("format", format)
             .build()
         return request(url.toString())
     }
 
-    private suspend fun fetchForecastJson(datasetId: String): String {
-        val url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/$datasetId".toHttpUrl()
-            .newBuilder()
-            .addQueryParameter("Authorization", apiKey)
-            .addQueryParameter("format", "JSON")
-            .build()
-        return request(url.toString()).use { it.string() }
-    }
+    /**
+     * Downloads a REST datastore product, or reuses the copy cached within
+     * [maxAge]. Main-safe: the body is read on the IO dispatcher.
+     */
+    private suspend fun <T> fetchRestJson(datasetId: String, maxAge: Duration, parse: (String) -> T): T =
+        responseCache.getOrFetch(
+            key = datasetId,
+            maxAge = maxAge,
+            fetch = {
+                val url = "https://$CWA_OPENDATA_HOST/api/v1/rest/datastore/$datasetId".toHttpUrl()
+                    .newBuilder()
+                    .addQueryParameter("format", "JSON")
+                    .build()
+                withContext(Dispatchers.IO) { request(url.toString()).use { it.string() } }
+            },
+            parse = parse,
+        )
 
+    /** Response bodies must be read off the main thread; callers own that dispatch. */
     private suspend fun request(url: String): okhttp3.ResponseBody {
         val request = Request.Builder().url(url).build()
         val response = execute(request)
@@ -879,7 +927,10 @@ class CwaWeatherDataSource(
     }
 
     private suspend fun execute(request: Request): Response = suspendCancellableCoroutine { continuation ->
-        val call = client.newCall(request)
+        val path = request.url.encodedPath
+        val restRequest = request.url.host == CWA_OPENDATA_HOST &&
+            (path.startsWith("/api/") || path.startsWith("/historyapi/"))
+        val call = (if (restRequest) uncachedClient else client).newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(
             object : Callback {
@@ -901,6 +952,15 @@ class CwaWeatherDataSource(
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
+
+        const val CWA_OPENDATA_HOST = "opendata.cwa.gov.tw"
+        const val HTTP_CACHE_MAX_BYTES = 48L * 1024L * 1024L
+        // CWA issues township forecasts every few hours and typhoon bulletins
+        // every 3–6 hours, so these bounds keep data current without polling.
+        val AREA_FORECAST_MAX_AGE: Duration = Duration.ofMinutes(30)
+        val WEEKLY_FORECAST_MAX_AGE: Duration = Duration.ofHours(1)
+        val TROPICAL_CYCLONE_MAX_AGE: Duration = Duration.ofMinutes(30)
+        val COUNTY_LOCATIONS_MAX_AGE: Duration = Duration.ofDays(7)
 
         const val WIND_DATASET_ID = "O-A0001-001"
         const val CURRENT_WEATHER_DATASET_ID = "O-A0003-001"

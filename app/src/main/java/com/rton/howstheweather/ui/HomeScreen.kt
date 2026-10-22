@@ -897,12 +897,6 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     }
     var mapLoaded by remember { mutableStateOf(false) }
     var mapLoadTimedOut by remember { mutableStateOf(false) }
-    val windCamera = remember(mapCamera) {
-        {
-            val position = mapCamera.position
-            WindParticleCamera(position.center, position.zoom)
-        }
-    }
     LaunchedEffect(Unit) {
         val alreadyGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -927,6 +921,16 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         state.legendExpanded -> 96.dp
         state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> 72.dp
         else -> 68.dp
+    }
+    // Google Maps centers the camera target in the area above its bottom padding;
+    // osmdroid applies no padding to its projection.
+    val mapCenterBottomInset = if (configuredMapProvider == MapProvider.GOOGLE) mapBottomContentPadding else 0.dp
+    val mapCenterBottomInsetPx by rememberUpdatedState(with(LocalDensity.current) { mapCenterBottomInset.toPx() })
+    val windCamera = remember(mapCamera) {
+        {
+            val position = mapCamera.position
+            WindParticleCamera(position.center, position.zoom, bottomInsetPx = mapCenterBottomInsetPx)
+        }
     }
     val firstTileLayerState = remember { WeatherTileLayerState() }
     val secondTileLayerState = remember { WeatherTileLayerState() }
@@ -1051,6 +1055,23 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         if (needsMove) cameraRequest = MapCameraRequest(requestedPoint, targetZoom)
         recenterRequest = null
     }
+    var mapSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    val density = LocalDensity.current
+    val setTyphoonEnabled: (Boolean) -> Unit = { enabled ->
+        viewModel.setTyphoonEnabled(enabled)
+        if (enabled && mapSize.width > 0) {
+            nearestCyclone(state.tropicalCyclones, state.target.coordinate)?.let { cyclone ->
+                cameraRequest = with(density) {
+                    typhoonFocusCamera(
+                        cyclone = cyclone,
+                        target = state.target.coordinate,
+                        widthDp = mapSize.width.toDp().value,
+                        heightDp = mapSize.height.toDp().value - mapCenterBottomInset.value,
+                    )
+                }
+            }
+        }
+    }
     val weatherLayers = buildList {
         if (tileProviders != null) {
             add(
@@ -1092,7 +1113,9 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         }
     }
 
-    Box(modifier) {
+    Box(modifier.onSizeChanged { mapSize = it }) {
+        val showTyphoon = state.destination == AppDestination.NOW &&
+            state.layers.typhoonEnabled && state.tropicalCyclones.isNotEmpty()
         WeatherBaseMap(
             camera = mapCamera,
             darkMap = darkMap,
@@ -1105,6 +1128,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             onMapLoaded = { mapLoaded = true },
             onCameraIdle = { viewModel.setMapViewport(center = it.center, zoom = it.zoom) },
             modifier = Modifier.fillMaxSize(),
+            typhoon = if (showTyphoon) TyphoonMapLayer(state.tropicalCyclones, darkMap) else null,
         )
         if (state.destination == AppDestination.NOW && state.layers.windEnabled) {
             WindParticleOverlay(
@@ -1114,14 +1138,28 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 darkMap = darkMap,
                 modifier = Modifier.fillMaxSize(),
             )
-            WindLegend(
-                provenance = state.windProvenance,
-                darkMap = darkMap,
+        }
+        if (state.destination == AppDestination.NOW && (state.layers.windEnabled || showTyphoon)) {
+            Column(
                 modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 72.dp),
-            )
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (state.layers.windEnabled) {
+                    WindLegend(provenance = state.windProvenance, darkMap = darkMap)
+                }
+                if (showTyphoon) {
+                    nearestCyclone(state.tropicalCyclones, state.target.coordinate)?.let { cyclone ->
+                        TyphoonLegend(
+                            cyclone = cyclone,
+                            otherCount = state.tropicalCyclones.size - 1,
+                            darkMap = darkMap,
+                        )
+                    }
+                }
+            }
         }
         if (state.destination == AppDestination.NOW) {
-            MapControls(state, viewModel, Modifier.align(Alignment.TopCenter))
+            MapControls(state, viewModel, setTyphoonEnabled, Modifier.align(Alignment.TopCenter))
             if (state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN) {
                 OneHourRainControls(state, Modifier.align(Alignment.BottomCenter))
             } else {
@@ -1320,7 +1358,67 @@ private fun WindLegend(provenance: WindProvenance, darkMap: Boolean, modifier: M
 }
 
 @Composable
-private fun MapControls(state: HomeUiState, viewModel: HomeViewModel, modifier: Modifier = Modifier) {
+private fun TyphoonLegend(
+    cyclone: TropicalCyclone,
+    otherCount: Int,
+    darkMap: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val palette = remember(darkMap) { typhoonPalette(darkMap) }
+    val latest = cyclone.latest
+    val time = remember(latest.time) {
+        DateTimeFormatter.ofPattern("M/d HH:mm", Locale.TAIWAN)
+            .withZone(ZoneId.of("Asia/Taipei"))
+            .format(latest.time)
+    }
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = .92f),
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+            Text(
+                buildString {
+                    append(cyclone.displayName)
+                    if (otherCount > 0) append(" 等 ${otherCount + 1} 個")
+                },
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                listOfNotNull(
+                    "$time 定位",
+                    latest.maxWindMetersPerSecond?.let { "${it.roundToInt()} m/s" },
+                    latest.pressureHectopascals?.let { "${it.roundToInt()} hPa" },
+                ).joinToString(" · "),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                listOf(
+                    palette.galeEdge to "7 級風",
+                    palette.stormEdge to "10 級風",
+                    palette.probabilityEdge to "70% 路徑",
+                ).forEach { (color, label) ->
+                    Box(Modifier.size(9.dp).background(color, RoundedCornerShape(99.dp)))
+                    Text(label, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            Text(
+                "中心旋轉圖示為示意，非觀測雲圖",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MapControls(
+    state: HomeUiState,
+    viewModel: HomeViewModel,
+    onTyphoonToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Row(
         modifier.padding(8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = .94f), RoundedCornerShape(16.dp)).padding(6.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1350,6 +1448,15 @@ private fun MapControls(state: HomeUiState, viewModel: HomeViewModel, modifier: 
         )
         IconToggleButton(checked = state.layers.windEnabled, onCheckedChange = viewModel::setWindEnabled) {
             Icon(Icons.Default.Air, "切換風場", tint = if (state.layers.windEnabled) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+        }
+        if (state.tropicalCyclones.isNotEmpty()) {
+            IconToggleButton(checked = state.layers.typhoonEnabled, onCheckedChange = onTyphoonToggle) {
+                Icon(
+                    Icons.Default.Cyclone,
+                    "切換颱風路徑與暴風圈",
+                    tint = if (state.layers.typhoonEnabled) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                )
+            }
         }
         IconButton(onClick = viewModel::toggleLegend) { Icon(Icons.Default.Gradient, "顯示圖例") }
     }

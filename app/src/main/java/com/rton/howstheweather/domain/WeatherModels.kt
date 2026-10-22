@@ -228,6 +228,7 @@ data class WindObservation(
 data class LayerSelection(
     val primary: PrimaryLayer = PrimaryLayer.RADAR_RAIN,
     val windEnabled: Boolean = false,
+    val typhoonEnabled: Boolean = false,
     val opacity: Float = 0.72f,
 )
 
@@ -267,6 +268,7 @@ data class HomeUiState(
     val windGrid: WindGrid? = null,
     val winds: List<WindObservation> = emptyList(),
     val windProvenance: WindProvenance = WindProvenance.UNAVAILABLE,
+    val tropicalCyclones: List<TropicalCyclone> = emptyList(),
     val isUpdating: Boolean = false,
     val message: String? = null,
 )

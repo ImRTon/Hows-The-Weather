@@ -57,6 +57,8 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private val source: WeatherDataSource = if (BuildConfig.CWA_API_KEY.isNotBlank()) {
         CwaWeatherDataSource(
             BuildConfig.CWA_API_KEY,
+            httpCacheDirectory = application.cacheDir.resolve("cwa-http"),
+            responseCacheDirectory = application.cacheDir.resolve("cwa-rest"),
             satelliteImageParser = CwaSatelliteImageParser.withBundledEastAsiaProjection(
                 application.resources,
             ),
@@ -79,7 +81,6 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private var historyJob: Job? = null
     private var historyJobKind: WeatherHistoryKind? = null
     private var windJob: Job? = null
-    private var windIdlePreloadJob: Job? = null
     private var currentWeatherJob: Job? = null
     private var areaForecastJob: Job? = null
     private var cacheWriteJob: Job? = null
@@ -93,6 +94,13 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private var cacheWasRead = false
     private var panelSelectionChanged = false
     private var windSelectionChanged = false
+    private var typhoonSelectionChanged = false
+    private var typhoonJob: Job? = null
+    private var autoRefreshJob: Job? = null
+    private var lastRefreshStartedAt = Long.MIN_VALUE / 2
+    private var windLoadedAt = Long.MIN_VALUE / 2
+    /** True from the start of a refresh until its decision forecast settles. */
+    private var awaitingDecisionForecast = false
     private var requestedHistoryKind: WeatherHistoryKind? = null
     private val presentedWeatherFrame = MutableStateFlow<WeatherFramePresentationKey?>(null)
     private val initialTarget = TargetLocation(GeoPoint(25.0478, 121.5319), "臺北市中心", false)
@@ -107,6 +115,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 ?: ThemePreference.SYSTEM,
             layers = LayerSelection(
                 windEnabled = savedStateHandle.get<Boolean>(WIND_ENABLED_STATE_KEY) ?: false,
+                typhoonEnabled = savedStateHandle.get<Boolean>(TYPHOON_ENABLED_STATE_KEY) ?: false,
             ),
             mapCenter = GeoPoint(
                 savedStateHandle.get<Double>(MAP_CENTER_LATITUDE_STATE_KEY) ?: initialTarget.coordinate.latitude,
@@ -123,13 +132,28 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     init {
         restorePanelAnchor()
         restoreWindPreference()
+        restoreTyphoonPreference()
         refresh()
-        viewModelScope.launch {
+    }
+
+    /**
+     * Automatic refresh runs only while the UI is visible. Returning to the app
+     * refreshes immediately when the data is older than one refresh interval.
+     */
+    fun onAppForeground() {
+        if (autoRefreshJob?.isActive == true) return
+        autoRefreshJob = viewModelScope.launch {
             while (true) {
-                delay(AUTO_REFRESH_MILLIS)
+                val sinceLastRefresh = SystemClock.elapsedRealtime() - lastRefreshStartedAt
+                delay((AUTO_REFRESH_MILLIS - sinceLastRefresh).coerceAtLeast(0L))
                 refresh()
             }
         }
+    }
+
+    fun onAppBackground() {
+        autoRefreshJob?.cancel()
+        autoRefreshJob = null
     }
 
     private fun restorePanelAnchor() {
@@ -155,13 +179,30 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 _uiState.update { state ->
                     state.copy(layers = state.layers.copy(windEnabled = persistedEnabled))
                 }
-                if (persistedEnabled) ensureWindLoaded(highPriority = true)
+                if (persistedEnabled) scheduleWindPreload()
+            }
+        }
+    }
+
+    private fun restoreTyphoonPreference() {
+        viewModelScope.launch {
+            val persistedEnabled = catchingCancellable {
+                getApplication<Application>().userPreferencesDataStore.data.first()[TYPHOON_ENABLED_KEY]
+            }.getOrNull() ?: return@launch
+            if (!typhoonSelectionChanged && savedStateHandle.get<Boolean>(TYPHOON_ENABLED_STATE_KEY) == null) {
+                savedStateHandle[TYPHOON_ENABLED_STATE_KEY] = persistedEnabled
+                _uiState.update { state ->
+                    state.copy(layers = state.layers.copy(typhoonEnabled = persistedEnabled))
+                }
             }
         }
     }
 
     fun refresh() {
+        refreshTropicalCyclones()
         if (refreshJob?.isActive == true) return
+        lastRefreshStartedAt = SystemClock.elapsedRealtime()
+        awaitingDecisionForecast = true
         decisionForecastJob?.cancel()
         regionalRadarJob?.cancel()
         enrichmentJob?.cancel()
@@ -230,6 +271,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
+                awaitingDecisionForecast = false
                 val lastOfficial = snapshot ?: cachedSnapshot
                 if (lastOfficial != null) {
                     applySnapshot(
@@ -260,6 +302,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             try {
                 val forecast = source.loadDecisionForecast(target) ?: return@launch
                 val current = snapshot ?: return@launch
+                awaitingDecisionForecast = false
                 val updated = current.copy(
                     rainForecast = forecast.grids,
                     forecastAtTarget = forecast.forecastAtTarget,
@@ -273,6 +316,14 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             } catch (error: Throwable) {
                 _uiState.update {
                     it.copy(message = "一小時降雨預報載入失敗：${error.message ?: "未知錯誤"} · 雷達仍可使用")
+                }
+            } finally {
+                if (decisionForecastJob === coroutineContext[Job]) {
+                    awaitingDecisionForecast = false
+                    // Without a forecast, replace "loading" with the honest unavailable state.
+                    snapshot?.takeIf { it.rainForecast.isEmpty() }?.let { loaded ->
+                        _uiState.update { it.copy(decision = decisionFor(loaded, it.target.coordinate)) }
+                    }
                 }
             }
         }
@@ -687,6 +738,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         }
 
     private fun decisionFor(loaded: WeatherSnapshot, point: GeoPoint): ForecastDecision {
+        if (loaded.rainForecast.isEmpty() && loaded.forecastAtTarget.isEmpty() && awaitingDecisionForecast) {
+            return decisionEngine.loadingHourly(loaded.issuedAt)
+        }
         val hourlyGrid = loaded.rainForecast.firstOrNull { it.unit == WeatherUnit.MILLIMETERS_ONE_HOUR }
         if (hourlyGrid != null) {
             val hourlyAmount = hourlyGrid.sample(point)
@@ -854,11 +908,54 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         localBounds = loaded?.radarRegional?.bounds,
     )
 
+    fun setTyphoonEnabled(enabled: Boolean) {
+        typhoonSelectionChanged = true
+        savedStateHandle[TYPHOON_ENABLED_STATE_KEY] = enabled
+        _uiState.update { it.copy(layers = it.layers.copy(typhoonEnabled = enabled)) }
+        if (enabled && _uiState.value.tropicalCyclones.isEmpty()) refreshTropicalCyclones()
+        viewModelScope.launch {
+            getApplication<Application>().userPreferencesDataStore.edit { preferences ->
+                preferences[TYPHOON_ENABLED_KEY] = enabled
+            }
+        }
+    }
+
+    private fun refreshTropicalCyclones() {
+        if (typhoonJob?.isActive == true) return
+        typhoonJob = viewModelScope.launch {
+            var attempt = 0
+            while (true) {
+                try {
+                    val cyclones = source.loadTropicalCyclones()
+                    _uiState.update { it.copy(tropicalCyclones = cyclones) }
+                    return@launch
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    android.util.Log.w(TYPHOON_LOG_TAG, "W-C0034-005 attempt ${attempt + 1} failed", error)
+                    // The toggle only appears once cyclones are known, so a silent
+                    // startup failure would hide the layer until the next refresh.
+                    val retryDelay = TYPHOON_RETRY_DELAYS_MILLIS.getOrNull(attempt++)
+                    if (retryDelay == null) {
+                        // Keep the last official track; the overlay is optional context.
+                        if (_uiState.value.layers.typhoonEnabled) {
+                            _uiState.update {
+                                it.copy(message = "颱風資料載入失敗：${error.message ?: "未知錯誤"}")
+                            }
+                        }
+                        return@launch
+                    }
+                    delay(retryDelay)
+                }
+            }
+        }
+    }
+
     fun setWindEnabled(enabled: Boolean) {
         windSelectionChanged = true
         savedStateHandle[WIND_ENABLED_STATE_KEY] = enabled
         _uiState.update { it.copy(layers = it.layers.copy(windEnabled = enabled)) }
-        if (enabled) ensureWindLoaded(highPriority = true) else windJob?.cancel()
+        if (enabled) scheduleWindPreload() else windJob?.cancel()
         viewModelScope.launch {
             getApplication<Application>().userPreferencesDataStore.edit { preferences ->
                 preferences[WIND_ENABLED_KEY] = enabled
@@ -866,20 +963,15 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         }
     }
 
+    /**
+     * Wind is the largest download (the model GRIB is several megabytes), so it
+     * is fetched only while the layer is enabled, at most once per model window.
+     */
     private fun scheduleWindPreload() {
-        windIdlePreloadJob?.cancel()
-        if (_uiState.value.layers.windEnabled) {
-            ensureWindLoaded(highPriority = true)
-            return
-        }
-        if (snapshot?.let(::windTimestamp) != null) return
-        windIdlePreloadJob = viewModelScope.launch {
-            areaForecastJob?.join()
-            delay(WIND_IDLE_PRELOAD_DELAY_MILLIS)
-            if (!_uiState.value.layers.windEnabled && snapshot?.let(::windTimestamp) == null) {
-                ensureWindLoaded(highPriority = false)
-            }
-        }
+        if (!_uiState.value.layers.windEnabled) return
+        val loadedRecently = SystemClock.elapsedRealtime() - windLoadedAt < WIND_REFRESH_MILLIS &&
+            snapshot?.windProvenance == WindProvenance.MODEL
+        if (!loadedRecently) ensureWindLoaded(highPriority = true)
     }
 
     private fun ensureWindLoaded(highPriority: Boolean) {
@@ -889,6 +981,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             try {
                 source.windUpdates().collect { loadedWind ->
                     val current = snapshot ?: return@collect
+                    if (loadedWind.provenance == WindProvenance.MODEL) {
+                        windLoadedAt = SystemClock.elapsedRealtime()
+                    }
                     val updated = current.copy(
                         windGrid = loadedWind.windGrid,
                         winds = loadedWind.winds,
@@ -1219,8 +1314,10 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private companion object {
         val PANEL_ANCHOR_KEY = stringPreferencesKey("panel_anchor")
         val WIND_ENABLED_KEY = booleanPreferencesKey("wind_enabled")
+        val TYPHOON_ENABLED_KEY = booleanPreferencesKey("typhoon_enabled")
         const val PANEL_ANCHOR_STATE_KEY = "panelAnchor"
         const val WIND_ENABLED_STATE_KEY = "windEnabled"
+        const val TYPHOON_ENABLED_STATE_KEY = "typhoonEnabled"
         const val MAP_CENTER_LATITUDE_STATE_KEY = "mapCenterLatitude"
         const val MAP_CENTER_LONGITUDE_STATE_KEY = "mapCenterLongitude"
         const val MAP_ZOOM_STATE_KEY = "mapZoom"
@@ -1233,8 +1330,10 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         const val AREA_FORECAST_ATTEMPTS = 2
         const val AREA_FORECAST_RETRY_DELAY_MILLIS = 400L
         const val CACHE_WRITE_DEBOUNCE_MILLIS = 1_000L
-        const val WIND_IDLE_PRELOAD_DELAY_MILLIS = 5_000L
+        const val WIND_REFRESH_MILLIS = 60 * 60 * 1_000L
         const val AUTO_REFRESH_MILLIS = 10 * 60 * 1_000L
+        val TYPHOON_RETRY_DELAYS_MILLIS = longArrayOf(5_000L, 15_000L, 45_000L, 120_000L)
+        const val TYPHOON_LOG_TAG = "HowsTheWeatherTyphoon"
     }
 
 }

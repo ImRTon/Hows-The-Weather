@@ -36,6 +36,9 @@ The decision card leads with one plain-language conclusion, followed by source t
   - `降雨雷達`: official numerical radar at “now,” official one-hour accumulated rainfall for the future product.
   - `雲層 β`: neutral cloud rendering and experimental motion extrapolation.
 - Wind is an independent optional overlay.
+- Typhoon is an independent optional overlay whose toggle appears only while CWA reports an active tropical cyclone. Track, forecast track, 70% probability area, and 7/10-level wind radii are drawn from official `W-C0034-005` values (quadrant radii when published, mean radius otherwise). The rotating spiral at the center is a stylized symbol: fixed screen size by intensity, never scaled to look like cloud extent, labeled `示意` in its legend, and its eye is decorative — do not fetch or imply real eye size. Enabling the toggle frames the target and the nearest cyclone.
+- Map-anchored geometry must render inside the base map's own frame (Google map objects, an osmdroid `Overlay`), not in a separate Compose layer that learns the camera a frame late. The typhoon layer follows this; the wind particles remain a Compose overlay.
+- Compose overlays that project with the camera must account for Google Maps' bottom content padding, which lifts the camera target above the view center; osmdroid applies no projection padding.
 - Map controls must remain compact and must not obscure the decision target or timeline.
 - In `DEMO_MAP_ID` mode, do not pass a Map ID to Google Maps; use the bundled JSON map style. With a real Map ID, use Cloud Styling and do not combine it with bundled `MapStyleOptions`.
 - If the base map has not loaded after a reasonable timeout, show a specific Maps SDK configuration message rather than leaving an unexplained blank surface.
@@ -89,6 +92,7 @@ The interface should feel precise and technical without behaving like a dense da
 - `F-B0046-001`: official future-one-hour accumulated rainfall (`mm/1h`).
 - `O-C0042-008`: intended satellite source; the current cloud UI still uses demo frames until the live image pipeline is connected and verified.
 - `O-A0001-001`: intended wind source; current wind observations are demo data until the live station adapter is connected and verified.
+- `W-C0034-005`: active tropical cyclone analysis track, forecast track, wind radii, and 70% probability radii. Typhoon geometry must never feed the rainfall decision.
 
 When `CWA_API_KEY` is present, `HomeViewModel` selects the live CWA source. If download or parsing fails, the app may fall back to deterministic demo grids, but it must show the actual failure reason and must not present demo data as official.
 
@@ -124,6 +128,10 @@ Do not change the decision result based on palette, opacity, contours, rendered 
 - The decision engine accepts numerical forecast values only.
 - `HomeUiState` is the single UI source of truth for target, time, panel anchor, layers, active grid, decision, and transient message.
 - Keep CWA and Google credentials in `local.properties`; never commit them. Remember that a CWA key embedded in an APK is recoverable, so a public release requires a backend proxy.
+- Send the CWA key only in the `Authorization` header to `opendata.cwa.gov.tw`, never as a URL parameter, so it cannot reach the HTTP cache journal or the S3 redirect target.
+- Network work happens only while the UI is in the foreground; never add an unconditional background polling loop.
+- Respect product cadence: fileapi/S3 files and product images go through the OkHttp disk cache (ETag / Last-Modified revalidation); REST datastore products, which have no validators, go through `CwaResponseCache` with a per-product maximum age. Large optional layers such as model wind load only when their layer is enabled.
+- Read network response bodies on `Dispatchers.IO`; data-source helpers must be main-safe.
 - Keep live and demo provenance explicit in the data model.
 
 ## Validation requirements

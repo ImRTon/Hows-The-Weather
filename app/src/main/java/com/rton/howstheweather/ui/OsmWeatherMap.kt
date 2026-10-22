@@ -27,10 +27,19 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Canvas
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalResources
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -60,8 +69,10 @@ import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.MapTileIndex
 import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.MapView
+import org.osmdroid.views.Projection
 import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.TilesOverlay
 import org.osmdroid.util.GeoPoint as OsmGeoPoint
 
@@ -78,6 +89,7 @@ internal fun OsmWeatherMap(
     onLongPress: (GeoPoint) -> Unit,
     onMapLoaded: () -> Unit,
     onCameraIdle: (MapCameraPosition) -> Unit,
+    typhoon: TyphoonMapLayer?,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -116,6 +128,23 @@ internal fun OsmWeatherMap(
         Marker(mapView).apply { setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM) }
     }
     val weatherOverlays = remember { OsmWeatherOverlays(context, mapView) }
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val typhoonOverlay = remember(density) { OsmTyphoonOverlay(density, textMeasurer) }
+    val typhoonGeometries = remember(typhoon?.cyclones) {
+        typhoon?.cyclones?.map(::cycloneGeometry).orEmpty()
+    }
+    val typhoonDarkMap = typhoon?.darkMap ?: darkMap
+    val typhoonPalette = remember(typhoonDarkMap) { typhoonPalette(typhoonDarkMap) }
+    val typhoonStyles = remember(typhoonPalette) { typhoonLabelStyles(typhoonPalette) }
+    if (typhoonGeometries.isNotEmpty()) {
+        LaunchedEffect(typhoonOverlay) {
+            runTyphoonAnimation { seconds ->
+                typhoonOverlay.seconds = seconds
+                mapView.invalidate()
+            }
+        }
+    }
 
     DisposableEffect(mapView) {
         val eventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
@@ -198,6 +227,8 @@ internal fun OsmWeatherMap(
             mapView.invalidate()
         }
         weatherOverlays.sync(weatherLayers, insertBefore = marker)
+        if (typhoonOverlay.update(typhoonGeometries, typhoonPalette, typhoonStyles)) mapView.invalidate()
+        syncTyphoonOverlay(mapView, typhoonOverlay, attached = typhoonGeometries.isNotEmpty(), insertBefore = marker)
     }
 
     Box(modifier) {
@@ -218,6 +249,69 @@ internal fun OsmWeatherMap(
 private fun MapView.cameraPosition(): MapCameraPosition {
     val center = mapCenter
     return MapCameraPosition(GeoPoint(center.latitude, center.longitude), zoomLevelDouble.toFloat())
+}
+
+/**
+ * Draws the typhoon layer inside osmdroid's own draw pass with that frame's
+ * projection, so it moves exactly with the base map during gestures.
+ */
+private class OsmTyphoonOverlay(
+    private val density: Density,
+    private val textMeasurer: TextMeasurer,
+) : Overlay() {
+    private var geometries: List<CycloneGeometry> = emptyList()
+    private var palette: TyphoonPalette? = null
+    private var styles: TyphoonLabelStyles? = null
+    private val drawScope = CanvasDrawScope()
+    private val pixel = android.graphics.Point()
+    var seconds = 0f
+
+    /** Returns true when the next frame must redraw. */
+    fun update(geometries: List<CycloneGeometry>, palette: TyphoonPalette, styles: TyphoonLabelStyles): Boolean {
+        if (geometries === this.geometries && palette == this.palette && styles === this.styles) return false
+        this.geometries = geometries
+        this.palette = palette
+        this.styles = styles
+        return true
+    }
+
+    override fun draw(canvas: android.graphics.Canvas, projection: Projection) {
+        val palette = palette ?: return
+        val styles = styles ?: return
+        if (geometries.isEmpty()) return
+        val project = { point: GeoPoint ->
+            projection.toPixels(OsmGeoPoint(point.latitude, point.longitude), pixel)
+            Offset(pixel.x.toFloat(), pixel.y.toFloat())
+        }
+        drawScope.draw(
+            density,
+            LayoutDirection.Ltr,
+            Canvas(canvas),
+            Size(canvas.width.toFloat(), canvas.height.toFloat()),
+        ) {
+            geometries.forEach { geometry ->
+                drawTyphoon(geometry, geometry.project(project), palette, styles, textMeasurer, seconds)
+            }
+        }
+    }
+}
+
+/** Keeps the typhoon overlay directly below the target marker and above weather tiles. */
+private fun syncTyphoonOverlay(mapView: MapView, overlay: OsmTyphoonOverlay, attached: Boolean, insertBefore: Marker) {
+    val overlays = mapView.overlays
+    val index = overlays.indexOf(overlay)
+    if (!attached) {
+        if (index >= 0) {
+            overlays.removeAt(index)
+            mapView.invalidate()
+        }
+        return
+    }
+    val markerIndex = overlays.indexOf(insertBefore)
+    if (index >= 0 && index == markerIndex - 1) return
+    if (index >= 0) overlays.removeAt(index)
+    overlays.add(overlays.indexOf(insertBefore).takeIf { it >= 0 } ?: overlays.size, overlay)
+    mapView.invalidate()
 }
 
 private fun configureOsmdroid(context: Context) {

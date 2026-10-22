@@ -108,6 +108,7 @@ internal fun WeatherBaseMap(
     onMapLoaded: () -> Unit,
     onCameraIdle: (MapCameraPosition) -> Unit,
     modifier: Modifier = Modifier,
+    typhoon: TyphoonMapLayer? = null,
 ) {
     // Creating the base map is the most expensive step of startup: Google Maps
     // loads its SDK module on the main thread. Let the decision card draw first,
@@ -137,6 +138,7 @@ internal fun WeatherBaseMap(
             onLongPress = onLongPress,
             onMapLoaded = onMapLoaded,
             onCameraIdle = onCameraIdle,
+            typhoon = typhoon,
             modifier = modifier,
         )
         MapProvider.OSM -> OsmWeatherMap(
@@ -150,6 +152,7 @@ internal fun WeatherBaseMap(
             onLongPress = onLongPress,
             onMapLoaded = onMapLoaded,
             onCameraIdle = onCameraIdle,
+            typhoon = typhoon,
             modifier = modifier,
         )
     }

@@ -85,9 +85,42 @@ class WeatherDataSourceTest {
             requestUrl.queryParameter("WeatherElement").orEmpty().split(','),
         )
         assertNull(requestUrl.queryParameter("elementName"))
+        assertNull(requestUrl.queryParameter("Authorization"))
+        assertEquals("test-key", requests.single().header("Authorization"))
+    }
+
+    @Test fun `REST products within their freshness window are not downloaded again`() = runTest {
+        var downloads = 0
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                downloads++
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(NO_CYCLONE_RESPONSE.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+        val cacheDirectory = java.nio.file.Files.createTempDirectory("cwa-rest").toFile()
+        try {
+            val first = CwaWeatherDataSource(apiKey = "test-key", client = client, responseCacheDirectory = cacheDirectory)
+            first.loadTropicalCyclones()
+            // A new instance models a process restart reading the same disk cache.
+            val restarted = CwaWeatherDataSource(apiKey = "test-key", client = client, responseCacheDirectory = cacheDirectory)
+            restarted.loadTropicalCyclones()
+
+            assertEquals(1, downloads)
+            assertTrue(cacheDirectory.walk().filter { it.isFile }.none { "test-key" in it.readBytes().decodeToString() })
+        } finally {
+            cacheDirectory.deleteRecursively()
+        }
     }
 
     private companion object {
+        const val NO_CYCLONE_RESPONSE = """{"success":"true","records":{"TropicalCyclones":{}}}"""
+
         fun radar(sourceId: String, bounds: GeoBounds) = WeatherGrid(
             width = 2,
             height = 2,

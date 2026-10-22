@@ -120,17 +120,21 @@ internal fun WindParticleOverlay(
     ) {
         val current = layout ?: return@Canvas
         val timeSeconds = frameNanos / 1_000_000_000.0
+        val camera = currentCamera()
         val cameraTransform = windParticleCameraTransform(
             reference = current.camera,
-            current = currentCamera(),
+            current = camera,
             density = density,
         )
         val canvasCenter = Offset(size.width / 2f, size.height / 2f)
+        // Layouts treat the canvas center as the camera target; move it to where the map draws it.
+        val targetShift = Offset(0f, -camera.bottomInsetPx / 2f)
         clipRect(0f, 0f, size.width, size.height) {
             current.particles.forEach { particle ->
                 val base = canvasCenter +
                     (particle.base - canvasCenter) * cameraTransform.scale +
-                    cameraTransform.translation
+                    cameraTransform.translation +
+                    targetShift
                 val reach = (particle.travelDistance + particle.length) * cameraTransform.scale
                 if (base.x < -reach || base.x > size.width + reach ||
                     base.y < -reach || base.y > size.height + reach
@@ -157,6 +161,8 @@ internal fun WindParticleOverlay(
 internal data class WindParticleCamera(
     val center: GeoPoint,
     val zoom: Float,
+    /** Bottom map padding that lifts the camera target above the canvas center. */
+    val bottomInsetPx: Float = 0f,
 )
 
 internal data class WindParticleCameraTransform(
@@ -461,6 +467,23 @@ internal fun screenToGeo(
     val normalizedY = worldY / worldSize
     val latitude = Math.toDegrees(atan(sinh(PI * (1.0 - 2.0 * normalizedY))))
     return GeoPoint(latitude, longitude)
+}
+
+internal fun geoToScreen(
+    point: GeoPoint,
+    width: Float,
+    height: Float,
+    center: GeoPoint,
+    zoom: Float,
+    density: Float,
+): Offset {
+    val worldSize = worldSizePixels(zoom, density)
+    var longitudeDelta = point.longitude - center.longitude
+    if (longitudeDelta > 180.0) longitudeDelta -= 360.0
+    if (longitudeDelta < -180.0) longitudeDelta += 360.0
+    val dx = longitudeDelta / 360.0 * worldSize
+    val dy = (mercatorY(point.latitude) - mercatorY(center.latitude)) * worldSize
+    return Offset((width / 2.0 + dx).toFloat(), (height / 2.0 + dy).toFloat())
 }
 
 private fun worldSizePixels(zoom: Float, density: Float): Double =
