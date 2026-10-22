@@ -1424,11 +1424,6 @@ private fun TyphoonLegend(
                     Text(label, style = MaterialTheme.typography.labelSmall)
                 }
             }
-            Text(
-                "中心旋轉圖示為示意，非觀測雲圖",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }
