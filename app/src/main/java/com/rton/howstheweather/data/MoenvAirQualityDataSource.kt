@@ -57,7 +57,8 @@ class MoenvAirQualityParser {
         val longitude = record.optString("longitude").toDoubleOrNull() ?: return null
         val aqi = record.optString("aqi").toIntOrNull() ?: return null
         val observedAt = runCatching {
-            LocalDateTime.parse(record.getString("publishtime"), TIME_FORMATTER)
+            // The live API publishes "yyyy/MM/dd HH:mm:ss"; older payloads used dashes.
+            LocalDateTime.parse(record.getString("publishtime").replace('/', '-'), TIME_FORMATTER)
                 .atZone(TAIPEI_ZONE)
                 .toInstant()
         }.getOrElse { Instant.EPOCH }

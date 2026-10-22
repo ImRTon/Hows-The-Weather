@@ -50,6 +50,20 @@ class MoenvAirQualityParserTest {
         assertEquals(42, result.aqi)
     }
 
+    @Test fun `parses slash-separated publish time from the live API`() {
+        val result = MoenvAirQualityParser().nearest(
+            json = """
+                [
+                  {"sitename":"龍潭","aqi":"33","status":"良好","pollutant":"","publishtime":"2026/10/22 17:00:00","longitude":"121.21646","latitude":"24.864"}
+                ]
+            """.trimIndent(),
+            target = GeoPoint(24.86, 121.21),
+        )
+
+        assertNotNull(result)
+        assertEquals(Instant.parse("2026-10-22T09:00:00Z"), result!!.observedAt)
+    }
+
     @Test fun `loads AQI away from the caller thread`() = runTest {
         val callerThread = Thread.currentThread().name
         val requestThread = AtomicReference<String>()
