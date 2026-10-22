@@ -86,22 +86,29 @@ internal fun AirQualityLevelFill(
 
     Canvas(modifier) {
         val fillWidth = max(16f * density, fill.value * size.width)
-        val fillAlpha = if (dark) .32f else .26f
+        val fillAlpha = if (dark) .38f else .32f
         val solid = color.copy(alpha = fillAlpha)
         val clear = color.copy(alpha = 0f)
 
-        // Even body that dissolves softly into the air instead of ending at a hard, dark edge.
-        val feather = 40f * density
-        val bodyEnd = fillWidth + feather * .5f
+        // The body keeps its full strength up to the level so its length reads as the value;
+        // only a narrow feather softens the edge.
+        val feather = 6f * density
+        val bodyEnd = fillWidth + feather
         drawRect(
             brush = Brush.horizontalGradient(
-                0f to color.copy(alpha = fillAlpha * .7f),
-                ((fillWidth - feather * .5f) / bodyEnd).coerceIn(0f, 1f) to solid,
+                0f to color.copy(alpha = fillAlpha * .75f),
+                (fillWidth / bodyEnd).coerceIn(0f, 1f) to solid,
                 1f to clear,
                 startX = 0f,
                 endX = bodyEnd,
             ),
             size = Size(bodyEnd, size.height),
+        )
+        drawLine(
+            color = color.copy(alpha = if (dark) .9f else .8f),
+            start = Offset(fillWidth, 0f),
+            end = Offset(fillWidth, size.height),
+            strokeWidth = 2f * density,
         )
 
         // Bubbles blown from the level's edge into the open air, drifting downwind before popping.
