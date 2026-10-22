@@ -31,6 +31,16 @@ class TyphoonFocusCameraTest {
     }
 
     @Test
+    fun centerCameraCentersOnTheStormAndZoomsOut() {
+        val storm = cyclone(GeoPoint(21.0, 126.0))
+        val camera = typhoonCenterCamera(storm, 400f, 500f)
+
+        assertEquals(storm.latest.center, camera.point)
+        assertTrue(camera.zoom in 3f..8f)
+        assertTrue(camera.zoom < 8f)
+    }
+
+    @Test
     fun nearestCycloneIsChosenForTheTarget() {
         val far = cyclone(GeoPoint(12.0, 150.0), name = "遠")
         val near = cyclone(GeoPoint(20.0, 125.0), name = "近")

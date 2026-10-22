@@ -15,10 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.WaterDrop
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -27,10 +24,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -53,28 +52,31 @@ internal fun QuantitativePrecipitationControls(
 ) {
     val grid = state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
     val streetLevel by remember { derivedStateOf { cameraZoom() >= 11f } }
+    val summaryHeight = remember { mutableIntStateOf(0) }
+    val legendHeight = remember { mutableIntStateOf(0) }
     Box(modifier) {
         QuantitativeRainSummary(
             state = state,
-            modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .onSizeChanged { summaryHeight.intValue = it.height }
+                .padding(12.dp),
         )
         QuantitativeRainLegend(
             selectedIndex = state.quantitativeForecastIndex,
             onSelectedIndex = viewModel::setQuantitativeForecastIndex,
             enabled = state.quantitativeForecastFrames.isNotEmpty(),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
-        )
-        FloatingActionButton(
-            onClick = onLocate,
             modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(12.dp)
-                .size(48.dp)
-                .semantics { contentDescription = if (locating) "正在取得目前位置" else "回到目前位置" },
-        ) {
-            if (locating) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-            else Icon(Icons.Default.MyLocation, "回到目前位置")
-        }
+                .align(Alignment.BottomCenter)
+                .onSizeChanged { legendHeight.intValue = it.height }
+                .padding(12.dp),
+        )
+        MapEndActions(
+            topControlsHeightPx = { summaryHeight.intValue },
+            bottomControlsHeightPx = { legendHeight.intValue },
+            locating = locating,
+            onLocate = onLocate,
+        )
         AnimatedVisibility(
             visible = grid != null && streetLevel,
             modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 164.dp),

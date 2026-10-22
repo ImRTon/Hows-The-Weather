@@ -244,15 +244,12 @@ private fun GoogleCyclone(
     }
     shapes.gale?.let { gale ->
         val dash = px(TYPHOON_GALE_DASH_DP)
-        MarchingDashPolygon(
+        Polygon(
             points = gale,
             fillColor = palette.galeFill,
             strokeColor = palette.galeEdge,
             strokeWidth = px(TYPHOON_GALE_EDGE_DP),
-            dash = dash,
-            gap = dash * TYPHOON_GALE_GAP_RATIO,
-            speed = TYPHOON_GALE_DASH_SPEED,
-            seconds = seconds,
+            strokePattern = remember(dash) { dashPattern(dash, dash * TYPHOON_GALE_GAP_RATIO) },
             zIndex = TYPHOON_Z_GALE,
         )
     }
@@ -278,14 +275,12 @@ private fun GoogleCyclone(
     }
     if (shapes.forecast.size > 1) {
         val dash = px(TYPHOON_FORECAST_DASH_DP)
-        MarchingDashPolyline(
+        Polyline(
             points = shapes.forecast,
             color = palette.track,
             width = px(TYPHOON_TRACK_WIDTH_DP),
-            dash = dash,
-            gap = dash * TYPHOON_FORECAST_GAP_RATIO,
-            speed = TYPHOON_FORECAST_DASH_SPEED,
-            seconds = seconds,
+            jointType = JointType.ROUND,
+            pattern = remember(dash) { dashPattern(dash, dash * TYPHOON_FORECAST_GAP_RATIO) },
             zIndex = TYPHOON_Z_FORECAST,
         )
     }
@@ -459,54 +454,11 @@ private fun PulseCircle(
     )
 }
 
-@Composable
-@GoogleMapComposable
-private fun MarchingDashPolyline(
-    points: List<LatLng>,
-    color: Color,
-    width: Float,
-    dash: Float,
-    gap: Float,
-    speed: Float,
-    seconds: State<Float>,
-    zIndex: Float,
-) {
-    Polyline(
-        points = points,
-        color = color,
-        width = width,
-        jointType = JointType.ROUND,
-        pattern = marchingDashPattern(dash, gap, typhoonDashOffset(dash, gap, speed, seconds.value)),
-        zIndex = zIndex,
-    )
-}
-
-@Composable
-@GoogleMapComposable
-private fun MarchingDashPolygon(
-    points: List<LatLng>,
-    fillColor: Color,
-    strokeColor: Color,
-    strokeWidth: Float,
-    dash: Float,
-    gap: Float,
-    speed: Float,
-    seconds: State<Float>,
-    zIndex: Float,
-) {
-    Polygon(
-        points = points,
-        fillColor = fillColor,
-        strokeColor = strokeColor,
-        strokeWidth = strokeWidth,
-        strokePattern = marchingDashPattern(dash, gap, typhoonDashOffset(dash, gap, speed, seconds.value)),
-        zIndex = zIndex,
-    )
-}
-
-/** A dash/gap pattern shifted forward by [offset] pixels; patterns have no phase of their own. */
-private fun marchingDashPattern(dash: Float, gap: Float, offset: Float): List<PatternItem> =
-    marchingDashSegments(dash, gap, offset).map { (isDash, length) -> if (isDash) Dash(length) else Gap(length) }
+/**
+ * Static on Google Maps: patterns have no phase, and replacing one every frame
+ * re-tessellates the stroke, which shows as stepping rather than flowing dashes.
+ */
+private fun dashPattern(dash: Float, gap: Float): List<PatternItem> = listOf(Dash(dash), Gap(gap))
 
 private fun metersPerPixel(latitude: Double, zoom: Float, density: Float): Double =
     EARTH_CIRCUMFERENCE_METERS * cos(Math.toRadians(latitude)) / (256.0 * density * 2.0.pow(zoom.toDouble()))

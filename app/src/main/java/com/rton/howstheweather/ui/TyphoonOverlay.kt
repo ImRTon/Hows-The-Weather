@@ -446,19 +446,6 @@ internal fun typhoonDashOffset(dash: Float, gap: Float, speed: Float, seconds: F
     return ((seconds * dash * speed) % period + period) % period
 }
 
-/**
- * One period of a dash/gap pattern shifted forward by [offset], as (isDash, length)
- * pairs, for map SDKs whose stroke patterns have no phase.
- */
-internal fun marchingDashSegments(dash: Float, gap: Float, offset: Float): List<Pair<Boolean, Float>> {
-    val segments = if (offset <= gap) {
-        listOf(false to offset, true to dash, false to gap - offset)
-    } else {
-        listOf(true to offset - gap, false to gap, true to dash - (offset - gap))
-    }
-    return segments.filter { (_, length) -> length > MIN_PATTERN_LENGTH }
-}
-
 internal fun typhoonPulsePhase(index: Int, seconds: Float): Float =
     ((seconds / PULSE_PERIOD_SECONDS) + index.toFloat() / TYPHOON_PULSE_COUNT) % 1f
 
@@ -542,26 +529,58 @@ internal fun typhoonFocusCamera(
     widthDp: Float,
     heightDp: Float,
 ): MapCameraRequest {
-    val latest = cyclone.latest
-    val reach = (latest.galeRadius?.quadrantsKm?.values?.maxOrNull() ?: latest.galeRadius?.meanKm ?: 150f).toDouble()
     val points = buildList {
         add(target)
-        listOf(0.0, 90.0, 180.0, 270.0).forEach { add(destinationPoint(latest.center, it, reach)) }
+        addAll(windReachPoints(cyclone))
         cyclone.forecast.filter { it.forecastHours <= FOCUS_FORECAST_HOURS }.forEach { add(it.center) }
     }
     val xs = points.map { (it.longitude + 180.0) / 360.0 }
     val ys = points.map { mercatorFraction(it.latitude) }
     val spanX = (xs.max() - xs.min()).coerceAtLeast(1e-6)
     val spanY = (ys.max() - ys.min()).coerceAtLeast(1e-6)
-    val usableWidth = widthDp.coerceAtLeast(120f) * FOCUS_FILL
-    val usableHeight = heightDp.coerceAtLeast(120f) * FOCUS_FILL
-    val zoom = log2(min(usableWidth / (256.0 * spanX), usableHeight / (256.0 * spanY)))
     val centerX = (xs.max() + xs.min()) / 2.0
     val centerY = (ys.max() + ys.min()) / 2.0
     return MapCameraRequest(
         point = GeoPoint(latitude = inverseMercatorFraction(centerY), longitude = centerX * 360.0 - 180.0),
-        zoom = zoom.toFloat().coerceIn(MIN_FOCUS_ZOOM, MAX_FOCUS_ZOOM),
+        zoom = fitZoom(spanX, spanY, widthDp, heightDp),
     )
+}
+
+/**
+ * Camera centered on the cyclone's latest official fix, zoomed out far enough to
+ * show its current wind radius and the next day of official forecast track.
+ */
+internal fun typhoonCenterCamera(
+    cyclone: TropicalCyclone,
+    widthDp: Float,
+    heightDp: Float,
+): MapCameraRequest {
+    val center = cyclone.latest.center
+    val centerX = (center.longitude + 180.0) / 360.0
+    val centerY = mercatorFraction(center.latitude)
+    val points = windReachPoints(cyclone) +
+        cyclone.forecast.filter { it.forecastHours <= CENTER_FORECAST_HOURS }.map { it.center }
+    val halfX = points.maxOf { abs((it.longitude + 180.0) / 360.0 - centerX) }
+    val halfY = points.maxOf { abs(mercatorFraction(it.latitude) - centerY) }
+    return MapCameraRequest(
+        point = center,
+        zoom = fitZoom((2.0 * halfX).coerceAtLeast(1e-6), (2.0 * halfY).coerceAtLeast(1e-6), widthDp, heightDp),
+    )
+}
+
+/** North, east, south, and west extremes of the current 7-level wind radius. */
+private fun windReachPoints(cyclone: TropicalCyclone): List<GeoPoint> {
+    val latest = cyclone.latest
+    val reach = (latest.galeRadius?.quadrantsKm?.values?.maxOrNull() ?: latest.galeRadius?.meanKm ?: 150f).toDouble()
+    return listOf(0.0, 90.0, 180.0, 270.0).map { destinationPoint(latest.center, it, reach) }
+}
+
+/** Zoom at which a Mercator span (world fractions) fills [FOCUS_FILL] of a 256 dp-world map. */
+private fun fitZoom(spanX: Double, spanY: Double, widthDp: Float, heightDp: Float): Float {
+    val usableWidth = widthDp.coerceAtLeast(120f) * FOCUS_FILL
+    val usableHeight = heightDp.coerceAtLeast(120f) * FOCUS_FILL
+    val zoom = log2(min(usableWidth / (256.0 * spanX), usableHeight / (256.0 * spanY)))
+    return zoom.toFloat().coerceIn(MIN_FOCUS_ZOOM, MAX_FOCUS_ZOOM)
 }
 
 private fun mercatorFraction(latitude: Double): Double {
@@ -641,10 +660,10 @@ internal const val TYPHOON_FORECAST_DOT_STROKE_DP = 1.6f
 /** Unions run in a 2^22-unit Mercator world: roughly one-meter float precision at typhoon latitudes. */
 private const val PLANE_SIZE = 4_194_304.0
 private const val MIN_CONTOUR_AREA = 1.0
-private const val MIN_PATTERN_LENGTH = .01f
 /** CWA moderate-typhoon threshold; weaker systems get a plain center dot instead of an eye. */
 private const val EYE_GLYPH_MIN_WIND = 32.7f
 private const val FOCUS_FORECAST_HOURS = 72
+private const val CENTER_FORECAST_HOURS = 24
 private const val FOCUS_FILL = .78
 private const val MIN_FOCUS_ZOOM = 3f
 private const val MAX_FOCUS_ZOOM = 8f

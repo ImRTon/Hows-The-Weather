@@ -7,27 +7,6 @@ import org.junit.Test
 
 class TyphoonMapGeometryTest {
     @Test
-    fun marchingDashesWithoutOffsetStartWithTheDash() {
-        assertEquals(listOf(true to 6f, false to 4f), marchingDashSegments(dash = 6f, gap = 4f, offset = 0f))
-    }
-
-    @Test
-    fun marchingDashesShiftForwardWithinTheGap() {
-        assertEquals(
-            listOf(false to 1f, true to 6f, false to 3f),
-            marchingDashSegments(dash = 6f, gap = 4f, offset = 1f),
-        )
-    }
-
-    @Test
-    fun marchingDashesWrapTheDashAcrossThePeriod() {
-        val segments = marchingDashSegments(dash = 6f, gap = 4f, offset = 7f)
-
-        assertEquals(listOf(true to 3f, false to 4f, true to 3f), segments)
-        assertEquals(10f, segments.sumOf { it.second.toDouble() }.toFloat(), 1e-4f)
-    }
-
-    @Test
     fun dashOffsetStaysWithinOnePeriod() {
         listOf(0f, .4f, 3.7f, 120f).forEach { seconds ->
             val offset = typhoonDashOffset(dash = 6f, gap = 4.8f, speed = 2f, seconds = seconds)

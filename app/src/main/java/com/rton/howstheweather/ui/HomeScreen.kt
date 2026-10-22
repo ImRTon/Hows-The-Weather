@@ -50,6 +50,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -91,6 +92,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -1072,6 +1074,21 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             }
         }
     }
+    val focusNearestTyphoon: () -> Unit = {
+        if (!state.layers.typhoonEnabled) viewModel.setTyphoonEnabled(true)
+        nearestCyclone(state.tropicalCyclones, state.target.coordinate)?.let { cyclone ->
+            if (mapSize.width > 0) cameraRequest = with(density) {
+                typhoonCenterCamera(
+                    cyclone = cyclone,
+                    widthDp = mapSize.width.toDp().value,
+                    heightDp = mapSize.height.toDp().value - mapCenterBottomInset.value,
+                )
+            }
+        }
+    }
+    // Written by onSizeChanged and read only during layout, so neither recomposes the map.
+    val topControlsHeight = remember { mutableIntStateOf(0) }
+    val bottomControlsHeight = remember { mutableIntStateOf(0) }
     val weatherLayers = buildList {
         if (tileProviders != null) {
             add(
@@ -1159,15 +1176,23 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             }
         }
         if (state.destination == AppDestination.NOW) {
-            MapControls(state, viewModel, setTyphoonEnabled, Modifier.align(Alignment.TopCenter))
+            MapControls(
+                state,
+                viewModel,
+                setTyphoonEnabled,
+                Modifier.align(Alignment.TopCenter).onSizeChanged { topControlsHeight.intValue = it.height },
+            )
+            val measureBottomControls = Modifier
+                .align(Alignment.BottomCenter)
+                .onSizeChanged { bottomControlsHeight.intValue = it.height }
             if (state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN) {
-                OneHourRainControls(state, Modifier.align(Alignment.BottomCenter))
+                OneHourRainControls(state, measureBottomControls)
             } else {
                 TimelineControls(
                     state = state,
                     viewModel = viewModel,
                     timelineMinute = timelineMinute,
-                    modifier = Modifier.align(Alignment.BottomCenter),
+                    modifier = measureBottomControls,
                 )
             }
         } else if (state.destination == AppDestination.PRECIPITATION) {
@@ -1180,19 +1205,15 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        if (state.destination == AppDestination.NOW) FloatingActionButton(
-            onClick = locateOrRequestPermission,
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(12.dp)
-                .size(48.dp)
-                .semantics {
-                    contentDescription = if (locating) "正在取得目前位置" else "回到目前位置"
-                },
-        ) {
-            if (locating) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-            else Icon(Icons.Default.MyLocation, "回到目前位置")
-        }
+        if (state.destination == AppDestination.NOW) MapEndActions(
+            topControlsHeightPx = { topControlsHeight.intValue },
+            bottomControlsHeightPx = { bottomControlsHeight.intValue },
+            locating = locating,
+            onLocate = locateOrRequestPermission,
+            secondaryAction = if (state.tropicalCyclones.isNotEmpty()) {
+                { TyphoonCenterButton(onClick = focusNearestTyphoon) }
+            } else null,
+        )
         AnimatedVisibility(
             visible = state.destination == AppDestination.NOW &&
                 state.layers.primary == PrimaryLayer.RADAR_RAIN &&
@@ -1411,6 +1432,75 @@ private fun TyphoonLegend(
         }
     }
 }
+
+/**
+ * Map buttons stacked at the bottom end, just above the bottom controls and below
+ * the top controls. Both heights are read only during layout so panel drags and
+ * legend toggles move the buttons without recomposition. When the map is too short
+ * for every button, the upper ones are skipped and the last button always stays.
+ */
+@Composable
+internal fun MapEndActions(
+    topControlsHeightPx: () -> Int,
+    bottomControlsHeightPx: () -> Int,
+    locating: Boolean,
+    onLocate: () -> Unit,
+    modifier: Modifier = Modifier,
+    secondaryAction: (@Composable () -> Unit)? = null,
+) {
+    val bottomInset = remember { Animatable(0f) }
+    val currentBottom by rememberUpdatedState(bottomControlsHeightPx)
+    LaunchedEffect(Unit) {
+        var settled = false
+        snapshotFlow { currentBottom() }.collectLatest { target ->
+            if (settled) bottomInset.animateTo(target.toFloat()) else bottomInset.snapTo(target.toFloat())
+            settled = target > 0
+        }
+    }
+    Layout(
+        content = {
+            secondaryAction?.invoke()
+            MapLocateButton(locating, onLocate)
+        },
+        modifier = modifier.fillMaxSize(),
+    ) { measurables, constraints ->
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val placeables = measurables.map { it.measure(loose) }
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            val margin = MAP_ACTION_MARGIN.roundToPx()
+            val top = topControlsHeightPx() + margin
+            var bottom = constraints.maxHeight - bottomInset.value.roundToInt() - margin
+            placeables.asReversed().forEachIndexed { index, placeable ->
+                if (index > 0 && bottom - placeable.height < top) return@layout
+                bottom -= placeable.height
+                placeable.place(constraints.maxWidth - margin - placeable.width, bottom)
+                bottom -= margin
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MapLocateButton(locating: Boolean, onLocate: () -> Unit) {
+    FloatingActionButton(
+        onClick = onLocate,
+        modifier = Modifier
+            .size(48.dp)
+            .semantics { contentDescription = if (locating) "正在取得目前位置" else "回到目前位置" },
+    ) {
+        if (locating) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+        else Icon(Icons.Default.MyLocation, "回到目前位置")
+    }
+}
+
+@Composable
+private fun TyphoonCenterButton(onClick: () -> Unit) {
+    FloatingActionButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
+        Icon(Icons.Default.Cyclone, "移到颱風中心")
+    }
+}
+
+private val MAP_ACTION_MARGIN = 12.dp
 
 @Composable
 private fun MapControls(
