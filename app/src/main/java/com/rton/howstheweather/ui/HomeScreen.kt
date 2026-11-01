@@ -18,6 +18,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.calculateTargetValue
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
@@ -50,6 +51,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
@@ -253,11 +256,12 @@ private fun WeatherWorkspace(
                 totalHeight = constraints.maxHeight.toFloat(),
                 preferredMinDecisionHeight = PANEL_COLLAPSED_HEIGHT.toPx(),
                 preferredMinMapHeight = PANEL_MIN_MAP_HEIGHT.toPx(),
-                preferredHandleHeight = PANEL_DIVIDER_HEIGHT.toPx(),
+                preferredHandleHeight = LAYER_RAIL_HEIGHT.toPx(),
                 handleTouchHeight = PANEL_HANDLE_TOUCH_HEIGHT.toPx(),
             )
         }
         val handleTouchPx = with(density) { PANEL_HANDLE_TOUCH_HEIGHT.toPx() }
+        val handleStripPx = with(density) { LAYER_RAIL_SEGMENT_ROW_HEIGHT.toPx() }
         val dividerHeight = with(density) { bounds.handleHeight.toDp() }
 
         // Anchors wrap the measured decision content, so every device gets the
@@ -408,23 +412,19 @@ private fun WeatherWorkspace(
                         }
                         .then(panelDrag),
                 )
-                val dividerLine = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)
-                val dividerSurface = MaterialTheme.colorScheme.surface
-                Box(
-                    Modifier
+                // The divider doubles as the primary-layer rail: vertical drags resize
+                // the panels, taps and horizontal swipes switch the layer.
+                MapLayerRail(
+                    selected = state.layers.primary,
+                    radarCoverage = state.radarCoverage,
+                    radarLoading = state.radarRegionalLoading,
+                    onSelect = viewModel::setPrimaryLayer,
+                    modifier = Modifier
                         .fillMaxWidth()
                         .height(dividerHeight)
                         .offset { IntOffset(0, displayedHeight().roundToInt()) }
                         .zIndex(1f)
-                        .drawBehind {
-                            drawRect(dividerSurface)
-                            val line = 1.dp.toPx()
-                            drawRect(
-                                color = dividerLine,
-                                topLeft = Offset(0f, size.height - line),
-                                size = Size(size.width, line),
-                            )
-                        },
+                        .then(panelDrag),
                 )
                 PanelHandle(
                     anchor = state.panelAnchor,
@@ -438,7 +438,9 @@ private fun WeatherWorkspace(
                         .width(96.dp)
                         .height(PANEL_HANDLE_TOUCH_HEIGHT)
                         .offset {
-                            val y = displayedHeight() + bounds.handleHeight / 2f - handleTouchPx / 2f
+                            // The touch target starts where the segment row ends and
+                            // reaches down into the map, never over the segments.
+                            val y = displayedHeight() + handleStripPx
                             IntOffset(0, y.coerceIn(0f, bounds.maxHandleTouchOffset).roundToInt())
                         }
                         .zIndex(2f)
@@ -457,7 +459,6 @@ private class PanelMotion {
 
 private val PANEL_COLLAPSED_HEIGHT = 48.dp
 private val PANEL_MIN_MAP_HEIGHT = 180.dp
-private val PANEL_DIVIDER_HEIGHT = 8.dp
 private val PANEL_HANDLE_TOUCH_HEIGHT = 48.dp
 private val PANEL_CONTENT_TOP_PADDING = 10.dp
 private val PANEL_CONTENT_BOTTOM_PADDING = 12.dp
@@ -495,10 +496,13 @@ private fun PanelHandle(
                 }
                 onClick("切換面板大小") { onClick(); true }
             },
-        contentAlignment = Alignment.Center,
+        contentAlignment = Alignment.TopCenter,
     ) {
+        // The pill sits in the rail's bottom strip, under the layer segments; the
+        // rest of the 48 dp target reaches down into the map, clear of the segments.
         Box(
             Modifier
+                .padding(top = 3.dp)
                 .size(width = barWidth, height = 4.dp)
                 .clip(RoundedCornerShape(99.dp))
                 .background(barColor)
@@ -1158,7 +1162,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         }
         if (state.destination == AppDestination.NOW && (state.layers.windEnabled || showTyphoon)) {
             Column(
-                modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 72.dp),
+                modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (state.layers.windEnabled) {
@@ -1176,11 +1180,14 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             }
         }
         if (state.destination == AppDestination.NOW) {
-            MapControls(
+            MapOverlayToolbar(
                 state,
                 viewModel,
                 setTyphoonEnabled,
-                Modifier.align(Alignment.TopCenter).onSizeChanged { topControlsHeight.intValue = it.height },
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .onSizeChanged { topControlsHeight.intValue = it.height }
+                    .padding(top = MAP_ACTION_MARGIN, end = MAP_ACTION_MARGIN),
             )
             val measureBottomControls = Modifier
                 .align(Alignment.BottomCenter)
@@ -1352,8 +1359,10 @@ private fun WindLegend(provenance: WindProvenance, darkMap: Boolean, modifier: M
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = .92f),
     ) {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
-            Text("粒子方向＝風吹去向", style = MaterialTheme.typography.labelSmall)
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                 listOf(
                     windColor(0f, darkMap) to "弱",
@@ -1365,15 +1374,13 @@ private fun WindLegend(provenance: WindProvenance, darkMap: Boolean, modifier: M
                     Text(label, style = MaterialTheme.typography.labelSmall)
                 }
             }
-            Text(
-                when (provenance) {
-                    WindProvenance.MODEL -> "WRF 3 km · 10 m 模式風"
-                    WindProvenance.OBSERVATION -> "氣象署測站觀測內插"
-                    WindProvenance.UNAVAILABLE -> "風場資料尚不可用"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (provenance == WindProvenance.UNAVAILABLE) {
+                Text(
+                    "風場資料尚不可用",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -1496,54 +1503,195 @@ private fun TyphoonCenterButton(onClick: () -> Unit) {
 }
 
 private val MAP_ACTION_MARGIN = 12.dp
+internal const val OVERLAY_TOOLBAR_AUTO_COLLAPSE_MILLIS = 3_000L
 
+internal class OverlayToolbarAutoCollapseState {
+    var expanded by mutableStateOf(false)
+        private set
+    var interactionGeneration by mutableIntStateOf(0)
+        private set
+    var pointerPressed by mutableStateOf(false)
+        private set
+
+    val shouldRunAutoCollapseTimer: Boolean
+        get() = expanded && !pointerPressed
+
+    fun expand() {
+        expanded = true
+        pointerPressed = false
+        interactionGeneration++
+    }
+
+    fun onPointerActivity(pressed: Boolean) {
+        if (!expanded) return
+        pointerPressed = pressed
+        interactionGeneration++
+    }
+
+    fun onAction() {
+        if (!expanded) return
+        interactionGeneration++
+    }
+
+    fun onTimeout() {
+        if (!pointerPressed) {
+            expanded = false
+        }
+    }
+}
+
+/**
+ * Independent overlay toggles at the top end of the map. Stays collapsed as a
+ * single 48 dp circle until tapped, then auto-collapses after inactivity inside
+ * the toolbar region. Primary layers live in [MapLayerRail].
+ */
 @Composable
-private fun MapControls(
+private fun MapOverlayToolbar(
     state: HomeUiState,
     viewModel: HomeViewModel,
     onTyphoonToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier.padding(8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = .94f), RoundedCornerShape(16.dp)).padding(6.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    val toolbarState = remember { OverlayToolbarAutoCollapseState() }
+    LaunchedEffect(
+        toolbarState.expanded,
+        toolbarState.interactionGeneration,
+        toolbarState.pointerPressed,
     ) {
-        FilterChip(
-            selected = state.layers.primary == PrimaryLayer.RADAR_RAIN,
-            onClick = { viewModel.setPrimaryLayer(PrimaryLayer.RADAR_RAIN) },
-            label = {
-                Text(
-                    when (state.radarCoverage) {
-                        RadarCoverage.WIDE -> "廣域雷達"
-                        RadarCoverage.LOCAL -> if (state.radarRegionalLoading) "區域載入中" else "區域雷達"
-                    },
-                )
-            },
-        )
-        FilterChip(
-            selected = state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN,
-            onClick = { viewModel.setPrimaryLayer(PrimaryLayer.ONE_HOUR_RAIN) },
-            label = { Text("1 小時") },
-        )
-        FilterChip(
-            selected = state.layers.primary == PrimaryLayer.CLOUD,
-            onClick = { viewModel.setPrimaryLayer(PrimaryLayer.CLOUD) },
-            label = { Text("雲層") },
-        )
-        IconToggleButton(checked = state.layers.windEnabled, onCheckedChange = viewModel::setWindEnabled) {
-            Icon(Icons.Default.Air, "切換風場", tint = if (state.layers.windEnabled) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+        if (toolbarState.shouldRunAutoCollapseTimer) {
+            delay(OVERLAY_TOOLBAR_AUTO_COLLAPSE_MILLIS)
+            toolbarState.onTimeout()
         }
-        if (state.tropicalCyclones.isNotEmpty()) {
-            IconToggleButton(checked = state.layers.typhoonEnabled, onCheckedChange = onTyphoonToggle) {
-                Icon(
-                    Icons.Default.Cyclone,
-                    "切換颱風路徑與暴風圈",
-                    tint = if (state.layers.typhoonEnabled) MaterialTheme.colorScheme.primary else LocalContentColor.current,
-                )
+    }
+    val hasActiveOverlay = state.layers.windEnabled ||
+        (state.tropicalCyclones.isNotEmpty() && state.layers.typhoonEnabled) ||
+        state.legendExpanded
+    val colors = IconButtonDefaults.iconToggleButtonColors(
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        checkedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+        checkedContentColor = MaterialTheme.colorScheme.primary,
+    )
+    val expandProgress by animateFloatAsState(
+        targetValue = if (toolbarState.expanded) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.8f, stiffness = 360f),
+        label = "overlay-toolbar-expand",
+    )
+    Surface(
+        modifier = modifier
+            .pointerInput(toolbarState) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        toolbarState.onPointerActivity(pressed = event.changes.any { it.pressed })
+                    }
+                }
+            },
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = .94f),
+        tonalElevation = 2.dp,
+        shadowElevation = 2.dp,
+    ) {
+        Layout(
+            modifier = Modifier.clipToBounds(),
+            content = {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clickable(
+                            enabled = !toolbarState.expanded,
+                            onClick = { toolbarState.expand() },
+                        )
+                        .graphicsLayer {
+                            val collapsedAlpha = (1f - expandProgress / 0.45f).coerceIn(0f, 1f)
+                            alpha = collapsedAlpha
+                            val scale = 0.84f + 0.16f * collapsedAlpha
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .semantics {
+                            role = Role.Button
+                            contentDescription = "展開風場、颱風與圖例開關"
+                        }
+                        .then(if (toolbarState.expanded) Modifier.clearAndSetSemantics { } else Modifier),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Default.Layers,
+                        contentDescription = null,
+                        tint = if (hasActiveOverlay) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .graphicsLayer {
+                            val expandedAlpha = ((expandProgress - 0.15f) / 0.85f).coerceIn(0f, 1f)
+                            alpha = expandedAlpha
+                            translationY = -(1f - expandProgress) * 10.dp.toPx()
+                        }
+                        .then(if (!toolbarState.expanded) Modifier.clearAndSetSemantics { } else Modifier),
+                ) {
+                    IconToggleButton(
+                        checked = state.layers.windEnabled,
+                        onCheckedChange = {
+                            if (toolbarState.expanded) {
+                                toolbarState.onAction()
+                                viewModel.setWindEnabled(it)
+                            }
+                        },
+                        colors = colors,
+                    ) {
+                        Icon(Icons.Default.Air, "風場")
+                    }
+                    if (state.tropicalCyclones.isNotEmpty()) {
+                        IconToggleButton(
+                            checked = state.layers.typhoonEnabled,
+                            onCheckedChange = {
+                                if (toolbarState.expanded) {
+                                    toolbarState.onAction()
+                                    onTyphoonToggle(it)
+                                }
+                            },
+                            colors = colors,
+                        ) {
+                            Icon(Icons.Default.Cyclone, "颱風路徑與暴風圈")
+                        }
+                    }
+                    IconToggleButton(
+                        checked = state.legendExpanded,
+                        onCheckedChange = {
+                            if (toolbarState.expanded) {
+                                toolbarState.onAction()
+                                viewModel.toggleLegend()
+                            }
+                        },
+                        colors = colors,
+                    ) {
+                        Icon(Icons.Default.Gradient, "圖例")
+                    }
+                }
+            },
+        ) { measurables, constraints ->
+            val loose = constraints.copy(minWidth = 0, minHeight = 0)
+            val collapsedPlaceable = measurables[0].measure(loose)
+            val expandedPlaceable = measurables[1].measure(loose)
+            val width = maxOf(collapsedPlaceable.width, expandedPlaceable.width)
+            val height = (
+                collapsedPlaceable.height +
+                    (expandedPlaceable.height - collapsedPlaceable.height) * expandProgress
+                ).roundToInt().coerceAtLeast(collapsedPlaceable.height)
+            layout(width, height) {
+                if (expandProgress < 1f) {
+                    collapsedPlaceable.place(0, 0)
+                }
+                if (expandProgress > 0f) {
+                    expandedPlaceable.place(0, 0)
+                }
             }
         }
-        IconButton(onClick = viewModel::toggleLegend) { Icon(Icons.Default.Gradient, "顯示圖例") }
     }
 }
 

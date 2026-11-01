@@ -22,6 +22,7 @@ The home screen is one vertically split workspace:
 - Drag and settle frames must not recompose the map: read the live panel height only in layout/draw lambdas. Summary/expanded content crossfades from the live height rather than switching at anchors.
 - Tapping the handle cycles through the same anchors.
 - Keep the visual divider between the decision card and map continuous across the full width; the short drag bar overlays that divider without creating a black gap.
+- The divider is also the primary-layer rail (`MapLayerRail`): an equal-width three-segment track (`廣域/區域雷達`, `1 小時`, `雲層 β`) with a sliding pill indicator, then a short drag pill in a strip directly below the segments. Vertical drags anywhere on the rail resize the panels; taps and horizontal swipes switch the layer, the indicator follows the finger, and a release snaps to the nearest segment (a fling advances at least one). The handle's 48 dp tap target starts below the segments, reaching down into the map, so it never covers a segment. The rail stays visible at every anchor.
 - Preserve the selected anchor and theme through state restoration.
 
 The decision card leads with one plain-language conclusion, followed by source time and supporting detail. It should never require users to decode a heatmap before knowing whether leaving is sensible.
@@ -39,7 +40,7 @@ The decision card leads with one plain-language conclusion, followed by source t
 - Typhoon is an independent optional overlay whose toggle appears only while CWA reports an active tropical cyclone. Track, forecast track, 70% probability area, and 7/10-level wind radii are drawn from official `W-C0034-005` values (quadrant radii when published, mean radius otherwise). The rotating spiral at the center is a stylized symbol: fixed screen size by intensity, never scaled to look like cloud extent, and its eye is decorative — do not fetch or imply real eye size. Do not add a legend caption explaining that the symbol is stylized. Enabling the toggle frames the target and the nearest cyclone.
 - Map-anchored geometry must render inside the base map's own frame (Google map objects, an osmdroid `Overlay`), not in a separate Compose layer that learns the camera a frame late. The typhoon layer follows this; the wind particles remain a Compose overlay.
 - Compose overlays that project with the camera must account for Google Maps' bottom content padding, which lifts the camera target above the view center; osmdroid applies no projection padding.
-- Map controls must remain compact and must not obscure the decision target or timeline.
+- Map controls must remain compact and must not obscure the decision target or timeline. Primary layers are switched only in the rail; the optional overlay toggles (wind, typhoon when active, legend) collapse into a single 48 dp circular button at the map's top end, expand into a vertical toolbar when tapped, and auto-collapse after inactivity in that toolbar region, while the wind/typhoon legends stack at the top start.
 - In `DEMO_MAP_ID` mode, do not pass a Map ID to Google Maps; use the bundled JSON map style. With a real Map ID, use Cloud Styling and do not combine it with bundled `MapStyleOptions`.
 - If the base map has not loaded after a reasonable timeout, show a specific Maps SDK configuration message rather than leaving an unexplained blank surface.
 
