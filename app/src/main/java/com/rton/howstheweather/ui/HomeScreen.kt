@@ -55,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.graphicsLayer
@@ -2238,22 +2239,20 @@ internal fun DockedMapBottomBar(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val surfaceColor = MaterialTheme.colorScheme.surface.copy(alpha = .94f)
-    val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .padding(horizontal = 10.dp)
+            .padding(bottom = 5.dp)
             .drawBehind {
                 val topY = topTouchOverhang.toPx().coerceIn(0f, size.height)
-                drawRect(
+                val visibleHeight = (size.height - topY).coerceAtLeast(0f)
+                val corner = 19.dp.toPx().coerceAtMost(visibleHeight / 2f)
+                drawRoundRect(
                     color = surfaceColor,
                     topLeft = Offset(0f, topY),
-                    size = Size(size.width, (size.height - topY).coerceAtLeast(0f)),
-                )
-                drawLine(
-                    color = dividerColor,
-                    start = Offset(0f, topY),
-                    end = Offset(size.width, topY),
-                    strokeWidth = 1.dp.toPx(),
+                    size = Size(size.width, visibleHeight),
+                    cornerRadius = CornerRadius(corner, corner),
                 )
             },
         content = content,
@@ -2568,7 +2567,7 @@ internal fun TimelineScrubber(
             )
         }
 
-        // Frame step ticks
+        // Frame step dots (no vertical dividing lines)
         if (stepCount > 0) {
             for (i in 0..stepCount) {
                 val stepFraction = i.toFloat() / stepCount
@@ -2576,22 +2575,11 @@ internal fun TimelineScrubber(
                 val reached = enabled && stepFraction <= fraction + 0.001f
                 val isMajor = majorStepEvery > 0 && (i % majorStepEvery == 0 || i == stepCount)
                 val color = if (reached) activeTickColor else inactiveTickColor
-                if (isMajor) {
-                    val halfTick = 3.5.dp.toPx()
-                    drawLine(
-                        color = color,
-                        start = Offset(tickX, centerY - halfTick),
-                        end = Offset(tickX, centerY + halfTick),
-                        strokeWidth = 1.6.dp.toPx(),
-                        cap = StrokeCap.Round,
-                    )
-                } else {
-                    drawCircle(
-                        color = color,
-                        radius = 1.3.dp.toPx(),
-                        center = Offset(tickX, centerY),
-                    )
-                }
+                drawCircle(
+                    color = color,
+                    radius = if (isMajor) 2.dp.toPx() else 1.2.dp.toPx(),
+                    center = Offset(tickX, centerY),
+                )
             }
         }
 
@@ -2637,29 +2625,21 @@ internal fun WeatherLegend(
         WeatherUnit.MILLIMETERS_TWELVE_HOURS -> listOf("0.1", "0.5", "2.5", "10", "25", "50", "100+ mm/12h")
         WeatherUnit.LUMINANCE -> listOf("低亮", "", "", "雲頂", "", "", "高亮")
     }
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .clip(RoundedCornerShape(99.dp)),
-            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
-        ) {
-            colors.forEach { value ->
+    Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        colors.forEachIndexed { index, value ->
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
                 Box(
                     Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(Color(value)),
+                        .size(width = 30.dp, height = 6.dp)
+                        .background(Color(value), RoundedCornerShape(99.dp)),
                 )
-            }
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            labels.forEach { label ->
                 Text(
-                    text = label,
-                    fontSize = 9.sp,
-                    lineHeight = 11.sp,
+                    text = labels[index],
+                    fontSize = 8.sp,
+                    lineHeight = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
