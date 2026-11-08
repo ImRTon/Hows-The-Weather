@@ -204,11 +204,16 @@ internal fun OsmWeatherMap(
     }
     LaunchedEffect(cameraRequest) {
         val request = cameraRequest ?: return@LaunchedEffect
-        mapView.controller.animateTo(
-            OsmGeoPoint(request.point.latitude, request.point.longitude),
-            request.zoom.toDouble(),
-            650L,
-        )
+        if (!request.animate) {
+            mapView.controller.setZoom(request.zoom.toDouble())
+            mapView.controller.setCenter(OsmGeoPoint(request.point.latitude, request.point.longitude))
+        } else {
+            mapView.controller.animateTo(
+                OsmGeoPoint(request.point.latitude, request.point.longitude),
+                request.zoom.toDouble(),
+                request.durationMs.toLong(),
+            )
+        }
         onCameraRequestHandled()
     }
     SideEffect {

@@ -1401,10 +1401,12 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     val mapCamera = remember { WeatherMapCameraState(MapCameraPosition(state.mapCenter, state.mapZoom)) }
     val fused = remember { LocationServices.getFusedLocationProviderClient(context) }
     var locating by remember { mutableStateOf(false) }
+    var userInitiatedLocate by remember { mutableStateOf(false) }
     var recenterRequest by remember { mutableStateOf<GeoPoint?>(null) }
-    val requestDeviceLocation = {
+    val requestDeviceLocation: (Boolean) -> Unit = { userInitiated ->
         if (!locating) {
             locating = true
+            if (userInitiated) userInitiatedLocate = true
             requestBestLocation(
                 client = fused,
                 onSuccess = { location ->
@@ -1420,6 +1422,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 },
                 onFailure = { reason ->
                     locating = false
+                    userInitiatedLocate = false
                     viewModel.showMessage(reason)
                 },
             )
@@ -1427,15 +1430,16 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants.values.any { it }) {
-            requestDeviceLocation()
+            requestDeviceLocation(true)
         } else {
+            userInitiatedLocate = false
             viewModel.showMessage("需要位置權限才能回到目前位置")
         }
     }
     val locateOrRequestPermission = {
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (granted) requestDeviceLocation()
+        if (granted) requestDeviceLocation(true)
         else permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
     }
     var mapLoaded by remember { mutableStateOf(false) }
@@ -1448,7 +1452,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     LaunchedEffect(Unit) {
         val alreadyGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (alreadyGranted) requestDeviceLocation()
+        if (alreadyGranted) requestDeviceLocation(false)
     }
     val darkMap = MaterialTheme.colorScheme.background.luminance() < .35f
     LaunchedEffect(mapLoaded) {
@@ -1582,21 +1586,25 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     }
     var lastCameraTarget by remember { mutableStateOf(state.target) }
     var cameraRequest by remember { mutableStateOf<MapCameraRequest?>(null) }
+    var initialPositionSettled by remember { mutableStateOf(false) }
     LaunchedEffect(state.target, recenterRequest) {
-        val targetChanged = state.target != lastCameraTarget
-        val requestedPoint = recenterRequest ?: state.target.coordinate.takeIf { targetChanged }
-        lastCameraTarget = state.target
-        if (requestedPoint == null) return@LaunchedEffect
-        val current = mapCamera.position
-        val targetZoom = if (recenterRequest != null || state.target.isDeviceLocation) {
-            DEFAULT_MAP_ZOOM
-        } else current.zoom.coerceAtLeast(10f)
-        val needsMove = abs(current.center.latitude - requestedPoint.latitude) > .00001 ||
-            abs(current.center.longitude - requestedPoint.longitude) > .00001 ||
-            abs(current.zoom - targetZoom) > .01f
-        if (needsMove) cameraRequest = MapCameraRequest(
-            requestedPoint, targetZoom, animate = mapLoaded && !state.target.isDeviceLocation,
+        val request = resolveCameraRequest(
+            target = state.target,
+            lastCameraTarget = lastCameraTarget,
+            recenterRequest = recenterRequest,
+            currentPosition = mapCamera.position,
+            mapLoaded = mapLoaded,
+            userInitiatedLocate = userInitiatedLocate,
+            initialPositionSettled = initialPositionSettled,
         )
+        lastCameraTarget = state.target
+        if (request != null) {
+            cameraRequest = request
+        }
+        if (mapLoaded || state.target.isDeviceLocation) {
+            initialPositionSettled = true
+        }
+        userInitiatedLocate = false
         recenterRequest = null
     }
     var mapSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
@@ -1791,6 +1799,37 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             }
         }
     }
+}
+
+internal fun resolveCameraRequest(
+    target: TargetLocation,
+    lastCameraTarget: TargetLocation,
+    recenterRequest: GeoPoint?,
+    currentPosition: MapCameraPosition,
+    mapLoaded: Boolean,
+    userInitiatedLocate: Boolean = false,
+    initialPositionSettled: Boolean = true,
+    durationMs: Int = DEFAULT_CAMERA_ANIMATION_DURATION_MS,
+): MapCameraRequest? {
+    val targetChanged = target != lastCameraTarget
+    val requestedPoint = recenterRequest ?: target.coordinate.takeIf { targetChanged }
+    if (requestedPoint == null) return null
+    val targetZoom = if (recenterRequest != null || target.isDeviceLocation) {
+        DEFAULT_MAP_ZOOM
+    } else currentPosition.zoom.coerceAtLeast(10f)
+    val needsMove = abs(currentPosition.center.latitude - requestedPoint.latitude) > .00001 ||
+        abs(currentPosition.center.longitude - requestedPoint.longitude) > .00001 ||
+        abs(currentPosition.zoom - targetZoom) > .01f
+    if (!needsMove) return null
+
+    val isUserLocate = userInitiatedLocate || recenterRequest != null
+    val shouldAnimate = mapLoaded && (isUserLocate || initialPositionSettled || !target.isDeviceLocation)
+    return MapCameraRequest(
+        point = requestedPoint,
+        zoom = targetZoom,
+        animate = shouldAnimate,
+        durationMs = durationMs,
+    )
 }
 
 internal fun shouldRefreshDeviceTarget(

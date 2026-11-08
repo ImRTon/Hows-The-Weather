@@ -169,7 +169,7 @@ internal fun GoogleWeatherMap(
             )
             // First positioning must not fly through unrelated zoom levels.
             if (!baseMapLoaded || !request.animate) googleMap.moveCamera(update)
-            else googleMap.animateCamera(update, 650, null)
+            else googleMap.animateCamera(update, request.durationMs, null)
             onCameraRequestHandled()
         }
         weatherLayers.forEach { layer ->

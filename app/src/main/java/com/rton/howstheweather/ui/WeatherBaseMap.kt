@@ -36,7 +36,14 @@ internal val configuredMapProvider: MapProvider = MapProvider.fromConfig(BuildCo
 
 internal data class MapCameraPosition(val center: GeoPoint, val zoom: Float)
 
-internal data class MapCameraRequest(val point: GeoPoint, val zoom: Float, val animate: Boolean = true)
+internal const val DEFAULT_CAMERA_ANIMATION_DURATION_MS = 650
+
+internal data class MapCameraRequest(
+    val point: GeoPoint,
+    val zoom: Float,
+    val animate: Boolean = true,
+    val durationMs: Int = DEFAULT_CAMERA_ANIMATION_DURATION_MS,
+)
 
 /**
  * Provider-neutral camera. Google Maps binds a live reader so draw-phase consumers
