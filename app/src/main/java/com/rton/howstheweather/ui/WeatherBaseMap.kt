@@ -1,5 +1,7 @@
 package com.rton.howstheweather.ui
 
+import com.rton.howstheweather.diagnostics.StartupDiagnostics
+
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,7 +36,7 @@ internal val configuredMapProvider: MapProvider = MapProvider.fromConfig(BuildCo
 
 internal data class MapCameraPosition(val center: GeoPoint, val zoom: Float)
 
-internal data class MapCameraRequest(val point: GeoPoint, val zoom: Float)
+internal data class MapCameraRequest(val point: GeoPoint, val zoom: Float, val animate: Boolean = true)
 
 /**
  * Provider-neutral camera. Google Maps binds a live reader so draw-phase consumers
@@ -117,9 +119,13 @@ internal fun WeatherBaseMap(
     val context = LocalContext.current
     var deferredCreation by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) {
+        StartupDiagnostics.event("map.creation.deferred provider=$configuredMapProvider")
         withFrameNanos { }
-        if (configuredMapProvider == MapProvider.GOOGLE) warmUpGoogleMaps(context.applicationContext)
+        if (configuredMapProvider == MapProvider.GOOGLE) {
+            StartupDiagnostics.measure("map.sdk.initialize") { warmUpGoogleMaps(context.applicationContext) }
+        }
         withFrameNanos { }
+        StartupDiagnostics.event("map.creation.released")
         deferredCreation = false
     }
     if (deferredCreation) {

@@ -10,6 +10,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -62,6 +64,7 @@ import com.google.maps.android.compose.rememberTileOverlayState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
 import com.rton.howstheweather.BuildConfig
 import com.rton.howstheweather.R
+import com.rton.howstheweather.diagnostics.StartupDiagnostics
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.TargetLocation
 import kotlinx.coroutines.flow.filter
@@ -92,7 +95,10 @@ internal fun GoogleWeatherMap(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val initialCamera = remember { camera.position }
+    var baseMapLoaded by remember { mutableStateOf(false) }
+    val initialCamera = remember {
+        cameraRequest?.let { MapCameraPosition(it.point, it.zoom) } ?: camera.position
+    }
     val cameraState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(
             LatLng(initialCamera.center.latitude, initialCamera.center.longitude),
@@ -129,7 +135,7 @@ internal fun GoogleWeatherMap(
         modifier = modifier.fillMaxSize(),
         cameraPositionState = cameraState,
         googleMapOptionsFactory = {
-            GoogleMapOptions().apply {
+            GoogleMapOptions().camera(cameraState.position).apply {
                 if (!usesBundledMapStyle) {
                     mapId(configuredMapId)
                 }
@@ -147,18 +153,23 @@ internal fun GoogleWeatherMap(
             tiltGesturesEnabled = false,
         ),
         onMapLongClick = { onLongPress(GeoPoint(it.latitude, it.longitude)) },
-        onMapLoaded = onMapLoaded,
+        onMapLoaded = {
+            baseMapLoaded = true
+            onMapLoaded()
+        },
     ) {
+        MapEffect(Unit) {
+            // The SDK map is usable here; onMapLoaded waits for complete rendering.
+            StartupDiagnostics.event("map.google.ready")
+        }
         MapEffect(cameraRequest) { googleMap ->
             val request = cameraRequest ?: return@MapEffect
-            googleMap.animateCamera(
-                CameraUpdateFactory.newLatLngZoom(
-                    LatLng(request.point.latitude, request.point.longitude),
-                    request.zoom,
-                ),
-                650,
-                null,
+            val update = CameraUpdateFactory.newLatLngZoom(
+                LatLng(request.point.latitude, request.point.longitude), request.zoom,
             )
+            // First positioning must not fly through unrelated zoom levels.
+            if (!baseMapLoaded || !request.animate) googleMap.moveCamera(update)
+            else googleMap.animateCamera(update, 650, null)
             onCameraRequestHandled()
         }
         weatherLayers.forEach { layer ->

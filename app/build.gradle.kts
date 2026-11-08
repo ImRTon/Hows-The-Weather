@@ -158,6 +158,19 @@ android {
         buildConfig = true
     }
 
+    // Same application ID and signing key as debug: Studio can update the
+    // existing app without clearing its data. Non-debuggable excludes JVMTI /
+    // Live Edit instrumentation when measuring the Maps SDK cold start.
+    buildTypes {
+        create("performance") {
+            initWith(getByName("release"))
+            isDebuggable = false
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

@@ -3,6 +3,7 @@ package com.rton.howstheweather.data
 import android.graphics.BitmapFactory
 import android.content.res.Resources
 import com.rton.howstheweather.R
+import com.rton.howstheweather.diagnostics.StartupDiagnostics
 import com.rton.howstheweather.domain.GeoBounds
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.LambertConformalProjection
@@ -324,17 +325,19 @@ class CwaSatelliteImageParser private constructor(
 
     companion object {
         fun withBundledEastAsiaProjection(resources: Resources): CwaSatelliteImageParser =
-            CwaSatelliteImageParser(
-                runCatching { readBundledEastAsiaProjection(resources) }.getOrNull(),
-                mapOf(
-                    TAIWAN_DATASET_ID to CloudImageCleaner(
-                        readBundledCloudBackground(resources, R.raw.cloud_background_taiwan),
+            StartupDiagnostics.measure("satellite.bundledAssets") {
+                CwaSatelliteImageParser(
+                    runCatching { readBundledEastAsiaProjection(resources) }.getOrNull(),
+                    mapOf(
+                        TAIWAN_DATASET_ID to CloudImageCleaner(
+                            readBundledCloudBackground(resources, R.raw.cloud_background_taiwan),
+                        ),
+                        EAST_ASIA_DATASET_ID to CloudImageCleaner(
+                            readBundledCloudBackground(resources, R.raw.cloud_background_east_asia),
+                        ),
                     ),
-                    EAST_ASIA_DATASET_ID to CloudImageCleaner(
-                        readBundledCloudBackground(resources, R.raw.cloud_background_east_asia),
-                    ),
-                ),
-            )
+                )
+            }
 
         private fun readBundledCloudBackground(
             resources: Resources,

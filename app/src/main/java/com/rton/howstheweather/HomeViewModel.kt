@@ -3,6 +3,7 @@ package com.rton.howstheweather
 import android.app.Application
 import android.content.Context
 import android.os.SystemClock
+import com.rton.howstheweather.diagnostics.StartupDiagnostics
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -59,9 +60,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             BuildConfig.CWA_API_KEY,
             httpCacheDirectory = application.cacheDir.resolve("cwa-http"),
             responseCacheDirectory = application.cacheDir.resolve("cwa-rest"),
-            satelliteImageParser = CwaSatelliteImageParser.withBundledEastAsiaProjection(
-                application.resources,
-            ),
+            satelliteImageParserFactory = {
+                CwaSatelliteImageParser.withBundledEastAsiaProjection(application.resources)
+            },
         )
     } else {
         UnavailableWeatherDataSource("尚未設定 CWA_API_KEY，官方氣象資料不可用")
@@ -199,7 +200,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     }
 
     fun refresh() {
-        refreshTropicalCyclones()
+        StartupDiagnostics.event("weather.refresh active=${refreshJob?.isActive == true} hasSnapshot=${snapshot != null}")
         if (refreshJob?.isActive == true) return
         lastRefreshStartedAt = SystemClock.elapsedRealtime()
         awaitingDecisionForecast = true
@@ -213,22 +214,29 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             _uiState.update { it.copy(isUpdating = true) }
             try {
                 val target = _uiState.value.target
-                refreshLocationDetails(target.coordinate)
                 var criticalApplied = false
                 if (!cacheWasRead) {
                     cacheWasRead = true
-                    launch {
-                        snapshotCache.read()?.let { cached ->
+                    val restore = async {
+                        val cached = StartupDiagnostics.measureSuspending("weather.snapshot.read") { snapshotCache.read() }
+                        StartupDiagnostics.event("weather.snapshot hit=${cached != null}")
+                        cached?.let {
                             cachedSnapshot = cached
                             if (!criticalApplied) {
                                 applySnapshot(cached)
                             }
                         }
                     }
+                    // Give the local cache a head start before starting network
+                    // decoding and tile work. A slow disk must not gate live data;
+                    // the restore continues and cannot overwrite a live result.
+                    withTimeoutOrNull(SNAPSHOT_HEAD_START_MILLIS) { restore.await() }
                 }
+                refreshLocationDetails(_uiState.value.target.coordinate)
+                refreshTropicalCyclones()
 
                 val critical = withTimeoutOrNull(CRITICAL_LOAD_TIMEOUT_MILLIS) {
-                    source.load(target.coordinate)
+                    StartupDiagnostics.measureSuspending("weather.critical") { source.load(target.coordinate) }
                 } ?: error("CWA 核心資料超過 15 秒未完成")
                 criticalApplied = true
                 val previous = snapshot ?: cachedSnapshot
@@ -384,6 +392,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 // Keep cloud/precipitation enrichment out of the network queue until
                 // those requests have completed.
                 areaForecastJob?.join()
+                decisionForecastJob?.join()
                 source.enrichmentUpdates(base, target).collect { enriched ->
                     val supplemental = enriched.preserveDecisionForecastFrom(snapshot)
                     applySnapshot(supplemental)
@@ -424,6 +433,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     }
 
     private fun applySnapshot(incoming: WeatherSnapshot) {
+        StartupDiagnostics.event("weather.snapshot.apply radarTime=${incoming.radar.validAt} regional=${incoming.radarRegional != null}")
         val previous = snapshot
         val loaded = incoming.preserveRegionalRadarFrom(previous)
         val targetPoint = _uiState.value.target.coordinate
@@ -979,6 +989,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         windJob = viewModelScope.launch {
             if (!highPriority) kotlinx.coroutines.yield()
             try {
+                decisionForecastJob?.join()
                 source.windUpdates().collect { loadedWind ->
                     val current = snapshot ?: return@collect
                     if (loadedWind.provenance == WindProvenance.MODEL) {
@@ -1330,6 +1341,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         const val AREA_FORECAST_ATTEMPTS = 2
         const val AREA_FORECAST_RETRY_DELAY_MILLIS = 400L
         const val CACHE_WRITE_DEBOUNCE_MILLIS = 1_000L
+        const val SNAPSHOT_HEAD_START_MILLIS = 750L
         const val WIND_REFRESH_MILLIS = 60 * 60 * 1_000L
         const val AUTO_REFRESH_MILLIS = 10 * 60 * 1_000L
         val TYPHOON_RETRY_DELAYS_MILLIS = longArrayOf(5_000L, 15_000L, 45_000L, 120_000L)

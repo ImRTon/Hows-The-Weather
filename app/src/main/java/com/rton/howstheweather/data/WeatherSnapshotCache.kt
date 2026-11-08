@@ -30,7 +30,9 @@ class WeatherSnapshotCache(
     suspend fun read(now: Instant = Instant.now()): WeatherSnapshot? = withContext(Dispatchers.IO) {
         val file = cacheFile.takeIf(File::isFile) ?: return@withContext null
         runCatching {
-            DataInputStream(GZIPInputStream(BufferedInputStream(file.inputStream()))).use { input ->
+            // Buffer decompressed bytes too: readFloat otherwise calls into the
+            // inflater for every byte, which is especially expensive before JIT.
+            DataInputStream(BufferedInputStream(GZIPInputStream(BufferedInputStream(file.inputStream())))).use { input ->
                 require(input.readInt() == MAGIC) { "Weather cache magic mismatch" }
                 require(input.readInt() == VERSION) { "Weather cache version mismatch" }
                 readSnapshot(input).takeIf { snapshot ->
@@ -48,7 +50,8 @@ class WeatherSnapshotCache(
         directory.mkdirs()
         val temporary = File(directory, "$FILE_NAME.tmp")
         runCatching {
-            DataOutputStream(GZIPOutputStream(BufferedOutputStream(temporary.outputStream()))).use { output ->
+            // Batch primitive writes before compression, not only after it.
+            DataOutputStream(BufferedOutputStream(GZIPOutputStream(BufferedOutputStream(temporary.outputStream())))).use { output ->
                 output.writeInt(MAGIC)
                 output.writeInt(VERSION)
                 writeSnapshot(output, snapshot)

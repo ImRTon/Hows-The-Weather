@@ -1,6 +1,7 @@
 package com.rton.howstheweather.data
 
 import android.graphics.BitmapFactory
+import com.rton.howstheweather.diagnostics.StartupDiagnostics
 import com.rton.howstheweather.domain.ForecastPoint
 import com.rton.howstheweather.domain.AreaForecast
 import com.rton.howstheweather.domain.CurrentWeatherObservation
@@ -56,7 +57,7 @@ class CwaWeatherDataSource(
     private val parser: CwaJsonGridParser = CwaJsonGridParser(),
     private val radarImageParser: CwaRadarImageParser = CwaRadarImageParser(),
     private val quantitativeForecastParser: CwaQuantitativeForecastImageParser = CwaQuantitativeForecastImageParser(),
-    private val satelliteImageParser: CwaSatelliteImageParser = CwaSatelliteImageParser(),
+    satelliteImageParser: CwaSatelliteImageParser = CwaSatelliteImageParser(),
     private val historyParser: CwaHistoryMetadataParser = CwaHistoryMetadataParser(),
     private val animationFrameParser: CwaAnimationFrameParser = CwaAnimationFrameParser(),
     private val cloudGridHarmonizer: CloudGridHarmonizer = CloudGridHarmonizer(),
@@ -65,7 +66,10 @@ class CwaWeatherDataSource(
     private val gribWindParser: CwaGrib2WindParser = CwaGrib2WindParser(),
     private val areaForecastParser: CwaAreaForecastParser = CwaAreaForecastParser(),
     private val tropicalCycloneParser: CwaTropicalCycloneParser = CwaTropicalCycloneParser(),
+    satelliteImageParserFactory: () -> CwaSatelliteImageParser = { satelliteImageParser },
 ) : WeatherDataSource {
+    // First accessed by satellite acquisition on IO, never during ViewModel construction.
+    private val satelliteImageParser by lazy(satelliteImageParserFactory)
     /**
      * The key travels in the Authorization header, never in the URL, so it is not
      * written into the HTTP cache journal. OkHttp drops this header itself when
@@ -100,7 +104,9 @@ class CwaWeatherDataSource(
     init { require(apiKey.isNotBlank()) }
 
     override suspend fun load(target: GeoPoint): WeatherSnapshot {
-        val radar = fetchRadarFrame(WIDE_RADAR_DATASET_ID, RADAR_WIDE_SAMPLE_SIZE)
+        val radar = StartupDiagnostics.measureSuspending("weather.radar.load") {
+            fetchRadarFrame(WIDE_RADAR_DATASET_ID, RADAR_WIDE_SAMPLE_SIZE)
+        }
         return WeatherSnapshot(
             radar = radar,
             radarRegional = null,
@@ -599,8 +605,10 @@ class CwaWeatherDataSource(
     }
 
     private suspend fun fetchGrid(datasetId: String, unit: WeatherUnit) = withContext(Dispatchers.IO) {
-        val body = fetchBody(datasetId, "JSON")
-        body.use { parser.parse(it.string(), unit, datasetId) }
+        StartupDiagnostics.measureSuspending("weather.grid.load source=$datasetId") {
+            val body = fetchBody(datasetId, "JSON")
+            body.use { parser.parse(it.string(), unit, datasetId) }
+        }
     }
 
     private suspend fun fetchRadarFrame(
@@ -727,17 +735,21 @@ class CwaWeatherDataSource(
         datasetId: String,
         sampleSize: Int,
     ): WeatherGrid {
-        val bytes = withContext(Dispatchers.IO) { request(metadata.productUrl).use { it.bytes() } }
+        val bytes = StartupDiagnostics.measureSuspending("weather.radar.body source=$datasetId") {
+            withContext(Dispatchers.IO) { request(metadata.productUrl).use { it.bytes() } }
+        }
         return withContext(PREPROCESSING_DISPATCHER) {
-            val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-                ?: error("CWA 雷達影像解碼失敗")
-            try {
-                val pixels = IntArray(image.width * image.height)
-                image.getPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
-                radarImageParser.toGrid(metadata, image.width, image.height, pixels, datasetId)
-            } finally {
-                image.recycle()
+            StartupDiagnostics.measure("weather.radar.decode source=$datasetId") {
+                val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+                val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                    ?: error("CWA 雷達影像解碼失敗")
+                try {
+                    val pixels = IntArray(image.width * image.height)
+                    image.getPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
+                    radarImageParser.toGrid(metadata, image.width, image.height, pixels, datasetId)
+                } finally {
+                    image.recycle()
+                }
             }
         }
     }
@@ -927,6 +939,11 @@ class CwaWeatherDataSource(
     }
 
     private suspend fun execute(request: Request): Response = suspendCancellableCoroutine { continuation ->
+        // Never log URLs, query strings, headers, or bodies (which may contain credentials).
+        val product = request.url.pathSegments.lastOrNull()
+            ?.takeIf { it.matches(Regex("[A-Z]-[A-Z0-9]{5}-[0-9]{3}")) } ?: "asset"
+        val stage = "weather.http.headers host=${request.url.host} product=$product"
+        val started = StartupDiagnostics.begin(stage)
         val path = request.url.encodedPath
         val restRequest = request.url.host == CWA_OPENDATA_HOST &&
             (path.startsWith("/api/") || path.startsWith("/historyapi/"))
@@ -935,10 +952,17 @@ class CwaWeatherDataSource(
         call.enqueue(
             object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
+                    StartupDiagnostics.end(stage, started)
+                    StartupDiagnostics.event("$stage failed type=${e.javaClass.simpleName}")
                     if (continuation.isActive) continuation.resumeWithException(e)
                 }
 
                 override fun onResponse(call: Call, response: Response) {
+                    StartupDiagnostics.end(stage, started)
+                    StartupDiagnostics.event(
+                        "$stage status=${response.code} cache=${response.cacheResponse != null} " +
+                            "network=${response.networkResponse?.code ?: 0}",
+                    )
                     if (continuation.isActive) continuation.resume(response)
                     else response.close()
                 }

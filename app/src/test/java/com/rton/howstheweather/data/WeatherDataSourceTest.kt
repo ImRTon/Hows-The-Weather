@@ -69,7 +69,11 @@ class WeatherDataSourceTest {
                     .build()
             }
             .build()
-        val source = CwaWeatherDataSource(apiKey = "test-key", client = client)
+        val source = CwaWeatherDataSource(
+            apiKey = "test-key",
+            client = client,
+            satelliteImageParserFactory = { error("Non-cloud startup must not initialize satellite assets") },
+        )
 
         val observation = source.loadCurrentWeather(GeoPoint(25.0478, 121.5319))
 

@@ -5,6 +5,8 @@
 
 package com.rton.howstheweather.ui
 
+import com.rton.howstheweather.diagnostics.StartupDiagnostics
+
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
@@ -92,9 +94,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -902,6 +902,11 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         else permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
     }
     var mapLoaded by remember { mutableStateOf(false) }
+    val mapLoadStarted = remember { StartupDiagnostics.begin("map.visibleLoad") }
+    DisposableEffect(Unit) {
+        StartupDiagnostics.event("map.workspace.enter")
+        onDispose { StartupDiagnostics.event("map.workspace.dispose") }
+    }
     var mapLoadTimedOut by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         val alreadyGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
@@ -912,7 +917,10 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     LaunchedEffect(mapLoaded) {
         if (!mapLoaded) {
             delay(8_000)
-            if (!mapLoaded) mapLoadTimedOut = true
+            if (!mapLoaded) {
+                mapLoadTimedOut = true
+                StartupDiagnostics.event("map.visibleLoad.timeout")
+            }
         } else {
             mapLoadTimedOut = false
         }
@@ -940,9 +948,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     }
     val firstTileLayerState = remember { WeatherTileLayerState() }
     val secondTileLayerState = remember { WeatherTileLayerState() }
-    // Both overlays attach inside the map composition, well before the base map
-    // finishes loading. Weather tiles can then load in parallel with the base map,
-    // and clearTileCache is still safe to call.
+    // Observe attachment before invalidating either overlay's SDK tile cache.
     val tileOverlaysAttached = firstTileLayerState.isAttached && secondTileLayerState.isAttached
     val tileProviders = remember(grid?.unit, renderTheme) {
         grid?.let {
@@ -954,8 +960,8 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 WeatherUnit.LUMINANCE -> WeatherRenderStyle.cloud(renderTheme, 1f)
             }
             arrayOf(
-                WeatherTileProvider(it, style),
-                WeatherTileProvider(it, style),
+                WeatherTileProvider(it, style, context.cacheDir.resolve("weather-tiles")),
+                WeatherTileProvider(it, style, context.cacheDir.resolve("weather-tiles")),
             )
         }
     }
@@ -967,7 +973,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(renderTheme, 1f)
                 else -> null
             }
-            style?.let { renderStyle -> WeatherTileProvider(it, renderStyle) }
+            style?.let { renderStyle -> WeatherTileProvider(it, renderStyle, context.cacheDir.resolve("weather-tiles")) }
         }
     }
     var frontTileSlot by remember(grid?.unit, renderTheme) { mutableIntStateOf(0) }
@@ -999,13 +1005,8 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         }
 
         val backTileSlot = 1 - frontTileSlot
-        val frontProvider = providers[frontTileSlot]
         val backProvider = providers[backTileSlot]
-        // Pre-render through the visible provider because it knows the current
-        // viewport. The cache is shared, so the hidden provider can consume the
-        // prepared PNGs immediately without clearing the visible overlay.
-        withContext(Dispatchers.Default) { frontProvider.preloadGrid(targetGrid) }
-        currentCoroutineContext().ensureActive()
+        // Let the SDK request the actual current viewport, not old animation views.
         backProvider.updateGrid(targetGrid)
         if (backTileSlot == 0) firstTileLayerState.clearTileCache()
         else secondTileLayerState.clearTileCache()
@@ -1058,7 +1059,9 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         val needsMove = abs(current.center.latitude - requestedPoint.latitude) > .00001 ||
             abs(current.center.longitude - requestedPoint.longitude) > .00001 ||
             abs(current.zoom - targetZoom) > .01f
-        if (needsMove) cameraRequest = MapCameraRequest(requestedPoint, targetZoom)
+        if (needsMove) cameraRequest = MapCameraRequest(
+            requestedPoint, targetZoom, animate = mapLoaded && !state.target.isDeviceLocation,
+        )
         recenterRequest = null
     }
     var mapSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
@@ -1146,7 +1149,11 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             weatherLayers = weatherLayers,
             bottomContentPadding = mapBottomContentPadding,
             onLongPress = { viewModel.selectTarget(it) },
-            onMapLoaded = { mapLoaded = true },
+            onMapLoaded = {
+                if (!mapLoaded) StartupDiagnostics.end("map.visibleLoad", mapLoadStarted)
+                mapLoaded = true
+                StartupDiagnostics.event("map.loaded.spinnerHidden")
+            },
             onCameraIdle = { viewModel.setMapViewport(center = it.center, zoom = it.zoom) },
             modifier = Modifier.fillMaxSize(),
             typhoon = if (showTyphoon) TyphoonMapLayer(state.tropicalCyclones, darkMap) else null,
@@ -1251,7 +1258,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                     Text(
                         if (mapLoadTimedOut) {
                             when (configuredMapProvider) {
-                                MapProvider.GOOGLE -> "Google 地圖無法載入\n請確認 Maps SDK、計費與 Android 金鑰限制"
+                                MapProvider.GOOGLE -> "Google 地圖載入較久\n請確認網路；若持續空白，檢查 Maps SDK、計費與金鑰限制"
                                 MapProvider.OSM -> "OpenStreetMap 圖磚無法載入\n請確認網路連線與 local.properties 的圖磚網址"
                             }
                         } else {

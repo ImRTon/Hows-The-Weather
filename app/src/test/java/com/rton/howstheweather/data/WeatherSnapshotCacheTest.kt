@@ -11,6 +11,7 @@ import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -19,6 +20,23 @@ import org.junit.rules.TemporaryFolder
 
 class WeatherSnapshotCacheTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
+
+    @Test fun `buffered compressed cache preserves grids across buffer boundaries`() = runTest {
+        val issuedAt = Instant.parse("2026-07-12T01:00:00Z")
+        val cache = WeatherSnapshotCache(temporaryFolder.newFolder())
+        val base = snapshot(issuedAt)
+        val values = FloatArray(257 * 129) { index ->
+            if (index % 17 == 0) Float.NaN else (index % 701 - 100) / 10f
+        }
+        val radar = base.radar.copy(width = 257, height = 129, values = values)
+        cache.write(base.copy(radar = radar))
+
+        val restored = cache.read(issuedAt.plusSeconds(60))!!
+        assertArrayEquals(values, restored.radar.values, 0f)
+        assertEquals(radar.bounds, restored.radar.bounds)
+        assertEquals(radar.validAt, restored.radar.validAt)
+        assertArrayEquals(base.rainForecast.single().values, restored.rainForecast.single().values, 0f)
+    }
 
     @Test fun `round trip preserves official numerical grids and missing values`() = runTest {
         val issuedAt = Instant.parse("2026-07-12T01:00:00Z")
