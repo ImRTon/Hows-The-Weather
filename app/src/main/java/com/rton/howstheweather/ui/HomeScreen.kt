@@ -19,12 +19,15 @@ import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.calculateTargetValue
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -39,6 +42,7 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -59,8 +63,16 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -97,8 +109,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 @Composable
 fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
@@ -581,6 +595,7 @@ private fun DecisionPanel(
                 PriorityForecastRow(
                     periods = priorityPeriods,
                     loading = state.areaForecastLoading && state.weeklyForecastLoading,
+                    animateWaves = !settledCollapsed,
                     modifier = Modifier
                         .fillMaxWidth()
                         .onSizeChanged { onPriorityMeasured(it.height) },
@@ -591,7 +606,11 @@ private fun DecisionPanel(
                     },
                     verticalArrangement = Arrangement.spacedBy(PANEL_CONTENT_SPACING),
                 ) {
-                    UpcomingRainStrip(upcomingRain, Modifier.fillMaxWidth())
+                    UpcomingRainStrip(
+                        periods = upcomingRain,
+                        animateWaves = state.panelAnchor == PanelAnchor.DECISION,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     CurrentObservationLine(
                         observation = state.currentWeather,
                         loading = state.currentWeatherLoading,
@@ -665,12 +684,13 @@ private fun Modifier.decisionMarquee(enabled: Boolean): Modifier =
 private fun PriorityForecastRow(
     periods: List<PriorityForecastPeriod>,
     loading: Boolean,
+    animateWaves: Boolean,
     modifier: Modifier = Modifier,
 ) {
     if (periods.isEmpty()) {
         Surface(
-            modifier = modifier.heightIn(min = 108.dp),
-            shape = RoundedCornerShape(14.dp),
+            modifier = modifier.heightIn(min = 112.dp),
+            shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .42f),
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
@@ -684,23 +704,173 @@ private fun PriorityForecastRow(
         }
         return
     }
-    Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        periods.forEach { period ->
-            PriorityForecastCard(period, Modifier.weight(1f))
+    val reduceMotion = rememberReduceMotion()
+    val wavePhase = remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(animateWaves, reduceMotion) {
+        if (!animateWaves || reduceMotion) return@LaunchedEffect
+        val start = withFrameNanos { it }
+        while (true) {
+            withFrameNanos { now ->
+                wavePhase.floatValue = (now - start) / 1_000_000_000f
+            }
+        }
+    }
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        periods.forEachIndexed { index, period ->
+            PriorityForecastCard(
+                period = period,
+                isPrimary = index == 0,
+                cardIndex = index,
+                wavePhase = { wavePhase.floatValue },
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
 
+private const val PRIORITY_NOTABLE_RAIN_PERCENT = 30
+
 @Composable
-private fun PriorityForecastCard(period: PriorityForecastPeriod, modifier: Modifier = Modifier) {
+private fun PriorityForecastCard(
+    period: PriorityForecastPeriod,
+    isPrimary: Boolean,
+    cardIndex: Int,
+    wavePhase: () -> Float,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.surface.luminance() < .5f
+    val daytime = remember(period.startAt, period.label) {
+        "晚" !in period.label && period.startAt.atZone(ZoneId.of("Asia/Taipei")).hour in 6..17
+    }
+    val rainPercent = period.precipitationProbabilityPercent
+    val rainFraction = ((rainPercent ?: 0).coerceIn(0, 100)) / 100f
+    val notableRain = (rainPercent ?: 0) >= PRIORITY_NOTABLE_RAIN_PERCENT
+    val fillProgress = remember { Animatable(0f) }
+    LaunchedEffect(rainFraction) {
+        fillProgress.animateTo(
+            targetValue = rainFraction,
+            animationSpec = spring(dampingRatio = .76f, stiffness = Spring.StiffnessLow),
+        )
+    }
+    val iconTint = weatherIconColor(period.weatherDescription, daytime)
+    val borderColor = when {
+        isPrimary -> colors.primary.copy(alpha = if (dark) .42f else .32f)
+        notableRain -> colors.primary.copy(alpha = if (dark) .26f else .20f)
+        else -> colors.outline.copy(alpha = if (dark) .18f else .14f)
+    }
+    val baseContainerColor = colors.surfaceVariant.copy(alpha = if (dark) .58f else .52f)
+    val topTint = if (isPrimary) {
+        colors.primary.copy(alpha = if (dark) .08f else .05f)
+    } else {
+        Color.Transparent
+    }
+
     Surface(
-        modifier = modifier.heightIn(min = 108.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .48f),
+        modifier = modifier.heightIn(min = 112.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = baseContainerColor,
+        border = BorderStroke(1.dp, borderColor),
     ) {
-        Column(
+        Box(
             Modifier
-                .padding(horizontal = 9.dp, vertical = 8.dp)
+                .drawBehind {
+                    val width = size.width
+                    val height = size.height
+                    if (topTint != Color.Transparent) {
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                colors = listOf(topTint, Color.Transparent),
+                                startY = 0f,
+                                endY = height * 0.55f,
+                            ),
+                        )
+                    }
+                    val level = fillProgress.value.coerceIn(0f, 1f)
+                    if (level > 0.005f) {
+                        // Cap visual water height at 88% so even 100% rain keeps the top rim and wave crest visible.
+                        val waterHeight = height * (0.06f + 0.82f * level)
+                        val baseSurfaceY = height - waterHeight
+                        val time = wavePhase()
+                        val phaseOffset = cardIndex * 1.15f
+                        val amp = (1.0f + 1.6f * level) * density
+                        val wavelength = width.coerceAtLeast(48f * density) * 0.95f
+                        val step = 4.dp.toPx().coerceAtLeast(2f)
+
+                        fun surfaceY(x: Float, shift: Float, speed: Float, scale: Float): Float {
+                            val wave = sin(x / wavelength * 2f * PI.toFloat() - time * speed + phaseOffset + shift) * amp * scale
+                            return (baseSurfaceY + wave).coerceIn(2.dp.toPx(), height - 1.dp.toPx())
+                        }
+
+                        val backPath = Path().apply {
+                            moveTo(0f, height)
+                            var x = 0f
+                            while (x < width) {
+                                lineTo(x, surfaceY(x, shift = 1.5f, speed = 1.6f, scale = 0.8f))
+                                x += step
+                            }
+                            lineTo(width, surfaceY(width, shift = 1.5f, speed = 1.6f, scale = 0.8f))
+                            lineTo(width, height)
+                            close()
+                        }
+                        drawPath(
+                            path = backPath,
+                            color = colors.primary.copy(alpha = if (dark) .14f else .10f),
+                        )
+
+                        val frontPath = Path()
+                        val crestPath = Path()
+                        frontPath.moveTo(0f, height)
+                        var x = 0f
+                        var first = true
+                        while (x < width) {
+                            val y = surfaceY(x, shift = 0f, speed = 2.2f, scale = 1f)
+                            frontPath.lineTo(x, y)
+                            if (first) {
+                                crestPath.moveTo(x, y)
+                                first = false
+                            } else {
+                                crestPath.lineTo(x, y)
+                            }
+                            x += step
+                        }
+                        val endY = surfaceY(width, shift = 0f, speed = 2.2f, scale = 1f)
+                        frontPath.lineTo(width, endY)
+                        if (first) crestPath.moveTo(width, endY) else crestPath.lineTo(width, endY)
+                        frontPath.lineTo(width, height)
+                        frontPath.close()
+
+                        val crestAlpha = if (notableRain) {
+                            if (dark) .34f else .25f
+                        } else {
+                            if (dark) .22f else .16f
+                        }
+                        val floorAlpha = if (notableRain) {
+                            if (dark) .16f else .11f
+                        } else {
+                            if (dark) .10f else .07f
+                        }
+                        drawPath(
+                            path = frontPath,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(
+                                    colors.primary.copy(alpha = crestAlpha),
+                                    colors.primary.copy(alpha = floorAlpha),
+                                ),
+                                startY = baseSurfaceY,
+                                endY = height,
+                            ),
+                        )
+                        drawPath(
+                            path = crestPath,
+                            color = colors.primary.copy(
+                                alpha = if (notableRain) (if (dark) .72f else .58f) else (if (dark) .42f else .34f),
+                            ),
+                            style = Stroke(width = 1.4.dp.toPx(), cap = StrokeCap.Round),
+                        )
+                    }
+                }
+                .padding(horizontal = 11.dp, vertical = 10.dp)
                 .semantics {
                     contentDescription = buildString {
                         append(period.label).append('，').append(period.weatherDescription)
@@ -710,62 +880,424 @@ private fun PriorityForecastCard(period: PriorityForecastPeriod, modifier: Modif
                         append('，').append(formatPriorityTemperature(period))
                     }
                 },
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            Text(period.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    weatherIcon(period.weatherDescription),
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = weatherIconColor(period.weatherDescription),
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    period.weatherDescription,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        period.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isPrimary) colors.primary else colors.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(iconTint.copy(alpha = if (dark) .16f else .12f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            weatherIcon(period.weatherDescription, daytime),
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = iconTint,
+                        )
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Icon(
+                        Icons.Default.WaterDrop,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = if (notableRain) colors.primary else colors.primary.copy(alpha = .58f),
+                    )
+                    Text(
+                        rainPercent?.let { "$it%" } ?: "—",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = 19.sp,
+                            lineHeight = 22.sp,
+                        ),
+                        fontWeight = FontWeight.Bold,
+                        color = if (notableRain) colors.primary else colors.onSurface,
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(
+                        period.weatherDescription,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        formatPriorityTemperature(period),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.onSurface.copy(alpha = .88f),
+                        maxLines = 1,
+                    )
+                }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.WaterDrop, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+internal fun upcomingRainSummaryLabel(periods: List<AreaForecastPeriod>): String {
+    val chances = periods.mapNotNull { it.precipitationProbabilityPercent?.coerceIn(0, 100) }
+    if (chances.isEmpty()) return "暫無資料"
+    val maxChance = chances.max()
+    val minChance = chances.min()
+    return when {
+        maxChance == 0 -> "全程 0%"
+        minChance == maxChance -> "維持 $maxChance%"
+        else -> "最高 $maxChance%"
+    }
+}
+
+/**
+ * Samples the normalized [0, 1] water-level curve across 3-hour forecast slots at [position] in [0, 1].
+ *
+ * Each slot sits at the center of its equal-width column `(i + 0.5) / count`, connected by
+ * monotone cubic Hermite (`smoothStep`) interpolation so the water level never overshoots [0, 1].
+ */
+internal fun sampleRainWaterLevelFraction(probabilities: List<Int?>, position: Float): Float {
+    if (probabilities.isEmpty()) return 0f
+    val count = probabilities.size
+    val knownIndices = probabilities.indices.filter { probabilities[it] != null }
+    if (knownIndices.isEmpty()) return 0f
+    fun centerFor(index: Int): Float = (index + 0.5f) / count
+    fun levelFor(index: Int): Float = (probabilities[index]!!.coerceIn(0, 100)) / 100f
+
+    val x = position.coerceIn(0f, 1f)
+    val firstKnown = knownIndices.first()
+    val lastKnown = knownIndices.last()
+    if (x <= centerFor(firstKnown)) return levelFor(firstKnown)
+    if (x >= centerFor(lastKnown)) return levelFor(lastKnown)
+
+    for (k in 0 until knownIndices.size - 1) {
+        val leftIndex = knownIndices[k]
+        val rightIndex = knownIndices[k + 1]
+        val leftX = centerFor(leftIndex)
+        val rightX = centerFor(rightIndex)
+        if (x in leftX..rightX) {
+            val span = (rightX - leftX).coerceAtLeast(1e-5f)
+            val t = ((x - leftX) / span).coerceIn(0f, 1f)
+            val smooth = t * t * (3f - 2f * t)
+            val leftLevel = levelFor(leftIndex)
+            val rightLevel = levelFor(rightIndex)
+            return leftLevel + (rightLevel - leftLevel) * smooth
+        }
+    }
+    return levelFor(lastKnown)
+}
+
+@Composable
+private fun UpcomingRainStrip(
+    periods: List<AreaForecastPeriod>,
+    animateWaves: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (periods.isEmpty()) return
+    val formatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.of("Asia/Taipei")) }
+    val summary = remember(periods) { upcomingRainSummaryLabel(periods) }
+    val probabilities = remember(periods) { periods.map { it.precipitationProbabilityPercent } }
+    val maxChance = remember(probabilities) { probabilities.filterNotNull().maxOrNull() ?: 0 }
+    val colors = MaterialTheme.colorScheme
+
+    Surface(
+        modifier = modifier.clearAndSetSemantics {
+            contentDescription = buildString {
+                append("接下來 12 小時降雨趨勢，").append(summary)
+                periods.forEach { period ->
+                    append("；").append(formatter.format(period.startAt)).append(" ")
+                    append(period.precipitationProbabilityPercent?.let { "降雨機率 $it%" } ?: "降雨機率未知")
+                }
+            }
+        },
+        shape = RoundedCornerShape(14.dp),
+        color = colors.surfaceVariant.copy(alpha = .32f),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
-                    period.precipitationProbabilityPercent?.let { " $it%" } ?: " —",
-                    style = MaterialTheme.typography.titleMedium,
+                    "接下來 12 小時降雨趨勢",
+                    style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
                 )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Icon(
+                        Icons.Default.WaterDrop,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = if (maxChance >= PRIORITY_NOTABLE_RAIN_PERCENT) {
+                            colors.primary
+                        } else {
+                            colors.onSurfaceVariant.copy(alpha = .7f)
+                        },
+                    )
+                    Text(
+                        summary,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (maxChance >= PRIORITY_NOTABLE_RAIN_PERCENT) {
+                            colors.primary
+                        } else {
+                            colors.onSurfaceVariant
+                        },
+                    )
+                }
             }
-            Text(formatPriorityTemperature(period), style = MaterialTheme.typography.labelSmall)
+            RainWaterLevelChart(
+                probabilities = probabilities,
+                animateWaves = animateWaves,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(60.dp)
+                    .clip(RoundedCornerShape(10.dp)),
+            )
+            Row(Modifier.fillMaxWidth()) {
+                periods.forEach { period ->
+                    val chance = period.precipitationProbabilityPercent ?: -1
+                    val isPeak = chance == maxChance && maxChance >= PRIORITY_NOTABLE_RAIN_PERCENT
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        Text(
+                            formatter.format(period.startAt),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (isPeak) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isPeak) colors.primary else colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun UpcomingRainStrip(periods: List<AreaForecastPeriod>, modifier: Modifier = Modifier) {
-    if (periods.isEmpty()) return
-    val formatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.of("Asia/Taipei")) }
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .32f),
-    ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("接下來 12 小時降雨機率", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                periods.forEach { period ->
-                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(formatter.format(period.startAt), style = MaterialTheme.typography.labelSmall)
-                        Text(
-                            period.precipitationProbabilityPercent?.let { "$it%" } ?: "—",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                }
+private fun RainWaterLevelChart(
+    probabilities: List<Int?>,
+    animateWaves: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val reduceMotion = rememberReduceMotion()
+    val fillProgress = remember { Animatable(0f) }
+    LaunchedEffect(probabilities) {
+        fillProgress.animateTo(
+            targetValue = 1f,
+            animationSpec = spring(dampingRatio = .76f, stiffness = Spring.StiffnessLow),
+        )
+    }
+    val wavePhase = remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(animateWaves, reduceMotion) {
+        if (!animateWaves || reduceMotion) return@LaunchedEffect
+        val start = withFrameNanos { it }
+        while (true) {
+            withFrameNanos { now ->
+                wavePhase.floatValue = (now - start) / 1_000_000_000f
+            }
+        }
+    }
+
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.surface.luminance() < .5f
+    val tankBackground = colors.surface.copy(alpha = if (dark) .46f else .58f)
+    val guideColor = colors.outline.copy(alpha = if (dark) .22f else .18f)
+    val primaryColor = colors.primary
+    val onSurfaceColor = colors.onSurface
+    val onSurfaceVariantColor = colors.onSurfaceVariant
+    val cutoutColor = colors.surface
+    val maxChance = remember(probabilities) { probabilities.filterNotNull().maxOrNull() ?: 0 }
+
+    Canvas(modifier.background(tankBackground)) {
+        val width = size.width
+        val height = size.height
+        if (width <= 0f || height <= 0f || probabilities.isEmpty()) return@Canvas
+
+        val topInset = 19.dp.toPx()
+        val bottomInset = 5.dp.toPx()
+        val usableHeight = (height - topInset - bottomInset).coerceAtLeast(1f)
+        val progress = fillProgress.value
+        val time = wavePhase.floatValue
+
+        fun baseY(x: Float): Float {
+            val fraction = sampleRainWaterLevelFraction(probabilities, x / width) * progress
+            return height - bottomInset - fraction * usableHeight
+        }
+
+        fun waveY(x: Float, phaseShift: Float, speed: Float, scale: Float): Float {
+            val fraction = sampleRainWaterLevelFraction(probabilities, x / width) * progress
+            val amp = (0.5f + 1.4f * fraction) * density * scale
+            val wavelength = 92f * density
+            val ripple = sin(x / wavelength * 2f * PI.toFloat() - time * speed + phaseShift) * amp
+            return (baseY(x) + ripple).coerceIn(topInset - 2.dp.toPx(), height - 1.5.dp.toPx())
+        }
+
+        // Subtle 50% watermark reference line across the middle of the tank.
+        val midY = height - bottomInset - 0.5f * usableHeight
+        drawLine(
+            color = guideColor,
+            start = Offset(0f, midY),
+            end = Offset(width, midY),
+            strokeWidth = 1.dp.toPx(),
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()), 0f),
+        )
+
+        val step = 4.dp.toPx().coerceAtLeast(2f)
+
+        // Back harmonic wave for liquid depth.
+        val backWavePath = Path().apply {
+            moveTo(0f, height)
+            var x = 0f
+            while (x < width) {
+                lineTo(x, waveY(x, phaseShift = 1.4f, speed = 1.7f, scale = 0.85f))
+                x += step
+            }
+            lineTo(width, waveY(width, phaseShift = 1.4f, speed = 1.7f, scale = 0.85f))
+            lineTo(width, height)
+            close()
+        }
+        drawPath(
+            path = backWavePath,
+            color = primaryColor.copy(alpha = if (dark) .18f else .14f),
+        )
+
+        // Primary water body and surface crest path.
+        val frontFillPath = Path()
+        val crestLinePath = Path()
+        frontFillPath.moveTo(0f, height)
+        var x = 0f
+        var first = true
+        while (x < width) {
+            val y = waveY(x, phaseShift = 0f, speed = 2.4f, scale = 1f)
+            frontFillPath.lineTo(x, y)
+            if (first) {
+                crestLinePath.moveTo(x, y)
+                first = false
+            } else {
+                crestLinePath.lineTo(x, y)
+            }
+            x += step
+        }
+        val endY = waveY(width, phaseShift = 0f, speed = 2.4f, scale = 1f)
+        frontFillPath.lineTo(width, endY)
+        if (first) crestLinePath.moveTo(width, endY) else crestLinePath.lineTo(width, endY)
+        frontFillPath.lineTo(width, height)
+        frontFillPath.close()
+
+        drawPath(
+            path = frontFillPath,
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    primaryColor.copy(alpha = if (dark) .44f else .34f),
+                    primaryColor.copy(alpha = if (dark) .10f else .07f),
+                ),
+                startY = topInset,
+                endY = height,
+            ),
+        )
+
+        // Vertical stems from each 3-hour slot anchor to the tank floor.
+        val count = probabilities.size
+        val columnWidth = width / count
+        probabilities.forEachIndexed { index, chance ->
+            chance ?: return@forEachIndexed
+            val nodeX = columnWidth * (index + 0.5f)
+            val nodeY = waveY(nodeX, phaseShift = 0f, speed = 2.4f, scale = 1f)
+            drawLine(
+                color = primaryColor.copy(alpha = if (dark) .22f else .18f),
+                start = Offset(nodeX, nodeY),
+                end = Offset(nodeX, height),
+                strokeWidth = 1.dp.toPx(),
+            )
+        }
+
+        // Trend crest line (類折線圖主線).
+        drawPath(
+            path = crestLinePath,
+            color = primaryColor.copy(alpha = if (dark) .92f else .85f),
+            style = Stroke(
+                width = 2.dp.toPx(),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round,
+            ),
+        )
+
+        // Anchor nodes and compact percentage labels riding on the water surface at each 3-hour slot.
+        val haloPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = cutoutColor.copy(alpha = .85f).toArgb()
+            textSize = 11.dp.toPx()
+            textAlign = android.graphics.Paint.Align.CENTER
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = 3.dp.toPx()
+            strokeJoin = android.graphics.Paint.Join.ROUND
+            isFakeBoldText = true
+        }
+        val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 11.dp.toPx()
+            textAlign = android.graphics.Paint.Align.CENTER
+        }
+        probabilities.forEachIndexed { index, chance ->
+            val nodeX = columnWidth * (index + 0.5f)
+            if (chance == null) {
+                labelPaint.color = onSurfaceVariantColor.copy(alpha = .7f).toArgb()
+                labelPaint.isFakeBoldText = false
+                drawContext.canvas.nativeCanvas.drawText("—", nodeX, height - 8.dp.toPx(), labelPaint)
+                return@forEachIndexed
+            }
+            val nodeY = waveY(nodeX, phaseShift = 0f, speed = 2.4f, scale = 1f)
+            val notable = chance >= PRIORITY_NOTABLE_RAIN_PERCENT
+            val isPeak = chance == maxChance && notable
+            val center = Offset(nodeX, nodeY)
+            if (isPeak) {
+                drawCircle(
+                    color = primaryColor.copy(alpha = if (dark) .28f else .22f),
+                    radius = 7.dp.toPx(),
+                    center = center,
+                )
+            }
+            drawCircle(
+                color = cutoutColor,
+                radius = if (isPeak) 4.5.dp.toPx() else 3.8.dp.toPx(),
+                center = center,
+            )
+            drawCircle(
+                color = primaryColor,
+                radius = if (isPeak) 3.2.dp.toPx() else 2.5.dp.toPx(),
+                center = center,
+            )
+            val text = "$chance%"
+            val labelY = (nodeY - 6.5.dp.toPx()).coerceAtLeast(11.5.dp.toPx())
+            labelPaint.color = when {
+                isPeak -> primaryColor.toArgb()
+                notable -> onSurfaceColor.toArgb()
+                else -> onSurfaceVariantColor.toArgb()
+            }
+            labelPaint.isFakeBoldText = notable
+            drawContext.canvas.nativeCanvas.apply {
+                drawText(text, nodeX, labelY, haloPaint)
+                drawText(text, nodeX, labelY, labelPaint)
             }
         }
     }
@@ -838,20 +1370,20 @@ private fun formatPriorityTemperature(period: PriorityForecastPeriod): String {
 private fun formatOneDecimal(value: Float, suffix: String): String =
     String.format(Locale.TAIWAN, "%.1f%s", value, suffix)
 
-private fun weatherIcon(description: String): ImageVector = when {
+private fun weatherIcon(description: String, daytime: Boolean = true): ImageVector = when {
     "雷" in description -> Icons.Default.Thunderstorm
     "雪" in description -> Icons.Default.AcUnit
     "雨" in description -> Icons.Default.WaterDrop
-    "晴" in description -> Icons.Default.WbSunny
+    "晴" in description -> if (daytime) Icons.Default.WbSunny else Icons.Default.NightsStay
     "雲" in description || "陰" in description -> Icons.Default.Cloud
     else -> Icons.Default.Info
 }
 
 @Composable
-private fun weatherIconColor(description: String): Color = when {
+private fun weatherIconColor(description: String, daytime: Boolean = true): Color = when {
     "雷" in description -> MaterialTheme.colorScheme.tertiary
     "雨" in description -> MaterialTheme.colorScheme.primary
-    "晴" in description -> Color(0xFFE6A400)
+    "晴" in description -> if (daytime) Color(0xFFE6A400) else Color(0xFF8AA8FF)
     else -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 

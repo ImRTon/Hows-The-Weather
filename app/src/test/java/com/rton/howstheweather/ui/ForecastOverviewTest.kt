@@ -104,4 +104,44 @@ class ForecastOverviewTest {
         val fall = precipitationFallVector(0f, 0f, null, null)
         assertEquals(1f, fall.y, 1e-4f)
     }
+
+    @Test
+    fun upcomingRainSummaryReflectsPeakSteadyDryAndMissingStates() {
+        assertEquals(
+            "最高 70%",
+            upcomingRainSummaryLabel(
+                listOf(period("2026-10-02T03:00:00Z", 20), period("2026-10-02T06:00:00Z", 70)),
+            ),
+        )
+        assertEquals(
+            "維持 30%",
+            upcomingRainSummaryLabel(
+                listOf(period("2026-10-02T03:00:00Z", 30), period("2026-10-02T06:00:00Z", 30)),
+            ),
+        )
+        assertEquals(
+            "全程 0%",
+            upcomingRainSummaryLabel(
+                listOf(period("2026-10-02T03:00:00Z", 0), period("2026-10-02T06:00:00Z", 0)),
+            ),
+        )
+        assertEquals(
+            "暫無資料",
+            upcomingRainSummaryLabel(listOf(period("2026-10-02T03:00:00Z", null))),
+        )
+    }
+
+    @Test
+    fun waterLevelCurveInterpolatesMonotonicallyBetweenSlotCenters() {
+        val probabilities = listOf(20, 80, 40, 0)
+        // Slot centers for 4 items are at 0.125, 0.375, 0.625, 0.875.
+        assertEquals(0.20f, sampleRainWaterLevelFraction(probabilities, 0.0f), 1e-4f)
+        assertEquals(0.20f, sampleRainWaterLevelFraction(probabilities, 0.125f), 1e-4f)
+        assertEquals(0.50f, sampleRainWaterLevelFraction(probabilities, 0.25f), 1e-4f)
+        assertEquals(0.80f, sampleRainWaterLevelFraction(probabilities, 0.375f), 1e-4f)
+        assertEquals(0.40f, sampleRainWaterLevelFraction(probabilities, 0.625f), 1e-4f)
+        assertEquals(0.0f, sampleRainWaterLevelFraction(probabilities, 0.875f), 1e-4f)
+        assertEquals(0.0f, sampleRainWaterLevelFraction(probabilities, 1.0f), 1e-4f)
+        assertEquals(0.0f, sampleRainWaterLevelFraction(listOf(null, null), 0.5f), 1e-4f)
+    }
 }
