@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,7 +19,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,10 +28,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rton.howstheweather.HomeViewModel
@@ -54,6 +55,8 @@ internal fun QuantitativePrecipitationControls(
     val streetLevel by remember { derivedStateOf { cameraZoom() >= 11f } }
     val summaryHeight = remember { mutableIntStateOf(0) }
     val legendHeight = remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    val bottomTouchOverhangPx = with(density) { QUANTITATIVE_BAR_TOUCH_OVERHANG.roundToPx() }
     Box(modifier) {
         QuantitativeRainSummary(
             state = state,
@@ -68,8 +71,9 @@ internal fun QuantitativePrecipitationControls(
             enabled = state.quantitativeForecastFrames.isNotEmpty(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .onSizeChanged { legendHeight.intValue = it.height }
-                .padding(12.dp),
+                .onSizeChanged {
+                    legendHeight.intValue = (it.height - bottomTouchOverhangPx).coerceAtLeast(0)
+                },
         )
         MapEndActions(
             topControlsHeightPx = { summaryHeight.intValue },
@@ -79,7 +83,7 @@ internal fun QuantitativePrecipitationControls(
         )
         AnimatedVisibility(
             visible = grid != null && streetLevel,
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 164.dp),
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 108.dp),
         ) {
             Text(
                 "原始格點約 ${grid?.resolutionKm?.let { "%.2f".format(it) } ?: "—"} km",
@@ -138,6 +142,8 @@ private fun QuantitativeRainSummary(state: HomeUiState, modifier: Modifier = Mod
     }
 }
 
+private val QUANTITATIVE_BAR_TOUCH_OVERHANG = 22.dp
+
 @Composable
 private fun QuantitativeRainLegend(
     selectedIndex: Int,
@@ -145,39 +151,58 @@ private fun QuantitativeRainLegend(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val colors = listOf(
-        0xFF37D6E6, 0xFF4169D8, 0xFF6D3AC6, 0xFFB62B96, 0xFFE64A54, 0xFFF49A38, 0xFFFFF1B5,
-    ).map(Long::toInt)
-    val labels = listOf("0.1", "0.5", "2.5", "10", "25", "50", "100+")
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = .95f),
+    val slots = listOf("0–12", "12–24", "24–36", "36–48 小時")
+    val activeLabel = slots.getOrElse(selectedIndex) { slots.first() }
+    DockedMapBottomBar(
+        modifier = modifier,
+        topTouchOverhang = QUANTITATIVE_BAR_TOUCH_OVERHANG,
     ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                listOf("0–12", "12–24", "24–36", "36–48 小時").forEach { label ->
-                    Text(label, style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            Slider(
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp)
+                .padding(bottom = 6.dp),
+        ) {
+            TimelineScrubber(
                 value = selectedIndex.toFloat(),
-                onValueChange = { onSelectedIndex(it.roundToInt()) },
                 valueRange = 0f..3f,
-                steps = 2,
+                stepCount = 3,
+                majorStepEvery = 1,
                 enabled = enabled,
+                visualTopInset = QUANTITATIVE_BAR_TOUCH_OVERHANG,
+                onValueChange = { onSelectedIndex(it.roundToInt()) },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .semantics { contentDescription = "未來 0 到 48 小時定量降水預報時間軸" },
+                    .height(48.dp)
+                    .semantics {
+                        contentDescription = "未來 0 到 48 小時定量降水預報時間軸"
+                        stateDescription = activeLabel
+                    },
             )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                labels.forEachIndexed { index, label ->
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(Modifier.size(width = 30.dp, height = 7.dp).background(Color(colors[index]), RoundedCornerShape(2.dp)))
-                        Text(label, style = MaterialTheme.typography.labelSmall)
-                    }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 5.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                slots.forEachIndexed { index, label ->
+                    val selected = index == selectedIndex
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
                 }
             }
+            WeatherLegend(
+                unit = WeatherUnit.MILLIMETERS_TWELVE_HOURS,
+                customLabels = listOf("0.1", "0.5", "2.5", "10", "25", "50", "100+"),
+            )
         }
     }
 }

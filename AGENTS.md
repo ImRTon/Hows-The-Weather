@@ -49,7 +49,6 @@ The decision card leads with one plain-language conclusion, followed by source t
 - Successful data-source information must not appear as a persistent snackbar.
 - Snackbars are for transient actions and actionable failures; clear them after display.
 - Do not place long captions over the map.
-- Show the short resolution badge (`雷達原始格點約 1.25 km`) only at street-level zoom (`zoom >= 11`).
 - Experimental or demo provenance must appear only when the affected layer is active.
 - Prefer direct labels such as `未來 1 小時 · 累積預報` over technical internal terminology.
 

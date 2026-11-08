@@ -39,6 +39,8 @@ import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.MarqueeSpacing
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
@@ -76,13 +78,16 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -1133,7 +1138,9 @@ private fun RainWaterLevelChart(
     Canvas(modifier.background(tankBackground)) {
         val width = size.width
         val height = size.height
-        if (width <= 0f || height <= 0f || probabilities.isEmpty()) return@Canvas
+        if (width <= 0f || height <= 0f || probabilities.isEmpty()) {
+            return@Canvas
+        }
 
         val topInset = 19.dp.toPx()
         val bottomInset = 5.dp.toPx()
@@ -1391,9 +1398,6 @@ private fun weatherIconColor(description: String, daytime: Boolean = true): Colo
 private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val mapCamera = remember { WeatherMapCameraState(MapCameraPosition(state.mapCenter, state.mapZoom)) }
-    // The camera changes every frame while panning or animating. Derive the one
-    // threshold composition needs so the whole map subtree does not recompose.
-    val streetLevel by remember(mapCamera) { derivedStateOf { mapCamera.position.zoom >= 11f } }
     val fused = remember { LocationServices.getFusedLocationProviderClient(context) }
     var locating by remember { mutableStateOf(false) }
     var recenterRequest by remember { mutableStateOf<GeoPoint?>(null) }
@@ -1460,13 +1464,11 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     val renderTheme = if (darkMap) RenderTheme.DARK else RenderTheme.LIGHT
     val grid = state.activeGrid
     val quantitativeGrid = state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
-    // Keep the base map attribution clear of our bottom controls and legend.
+    // Keep the base map attribution clear of our docked bottom controls and legend.
     val mapBottomContentPadding = when {
-        state.destination == AppDestination.PRECIPITATION -> 120.dp
-        state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN && state.legendExpanded -> 108.dp
-        state.legendExpanded -> 96.dp
-        state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> 72.dp
-        else -> 68.dp
+        state.destination == AppDestination.PRECIPITATION -> 82.dp
+        state.legendExpanded -> 64.dp
+        else -> 40.dp
     }
     // Google Maps centers the camera target in the area above its bottom padding;
     // osmdroid applies no padding to its projection.
@@ -1728,9 +1730,12 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                     .onSizeChanged { topControlsHeight.intValue = it.height }
                     .padding(top = MAP_ACTION_MARGIN, end = MAP_ACTION_MARGIN),
             )
+            val bottomTouchOverhangPx = with(density) { TIMELINE_TOUCH_OVERHANG.roundToPx() }
             val measureBottomControls = Modifier
                 .align(Alignment.BottomCenter)
-                .onSizeChanged { bottomControlsHeight.intValue = it.height }
+                .onSizeChanged {
+                    bottomControlsHeight.intValue = (it.height - bottomTouchOverhangPx).coerceAtLeast(0)
+                }
             if (state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN) {
                 OneHourRainControls(state, measureBottomControls)
             } else {
@@ -1760,23 +1765,6 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 { TyphoonCenterButton(onClick = focusNearestTyphoon) }
             } else null,
         )
-        AnimatedVisibility(
-            visible = state.destination == AppDestination.NOW &&
-                state.layers.primary == PrimaryLayer.RADAR_RAIN &&
-                state.radarCoverage == RadarCoverage.LOCAL && streetLevel,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(
-                    start = 12.dp,
-                    bottom = if (state.legendExpanded) 132.dp else 94.dp,
-                ),
-        ) {
-            Text(
-                "雷達原始格點約 1.25 km",
-                modifier = Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = .9f), RoundedCornerShape(8.dp)).padding(8.dp),
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
         if (!mapLoaded) {
             Surface(
                 modifier = Modifier.align(Alignment.Center).padding(24.dp),
@@ -2234,38 +2222,90 @@ private fun MapOverlayToolbar(
     }
 }
 
+/** Visible strip height of the docked map bottom bar (excluding the invisible top touch overhang). */
+internal val TIMELINE_BAR_VISIBLE_HEIGHT = 38.dp
+
+/** Invisible touch extension above the top divider so controls keep a 48 dp touch target. */
+internal val TIMELINE_TOUCH_OVERHANG = 10.dp
+
+private val TIMELINE_ROW_TOUCH_HEIGHT = TIMELINE_BAR_VISIBLE_HEIGHT + TIMELINE_TOUCH_OVERHANG
+private val TIMELINE_TRACK_HORIZONTAL_INSET = 8.dp
+
+@Composable
+internal fun DockedMapBottomBar(
+    modifier: Modifier = Modifier,
+    topTouchOverhang: androidx.compose.ui.unit.Dp = TIMELINE_TOUCH_OVERHANG,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val surfaceColor = MaterialTheme.colorScheme.surface.copy(alpha = .94f)
+    val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .drawBehind {
+                val topY = topTouchOverhang.toPx().coerceIn(0f, size.height)
+                drawRect(
+                    color = surfaceColor,
+                    topLeft = Offset(0f, topY),
+                    size = Size(size.width, (size.height - topY).coerceAtLeast(0f)),
+                )
+                drawLine(
+                    color = dividerColor,
+                    start = Offset(0f, topY),
+                    end = Offset(size.width, topY),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            },
+        content = content,
+    )
+}
+
 @Composable
 private fun OneHourRainControls(state: HomeUiState, modifier: Modifier = Modifier) {
     val grid = state.quantitativeRainGrid
     val amount = grid?.sample(state.target.coordinate)
-    Surface(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = .96f),
-        tonalElevation = 2.dp,
-    ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.WaterDrop, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("未來 1 小時累積雨量", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        grid?.sourceId ?: "等待 F-B0046-001 數值格點",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Text(
-                    amount?.let { "%.1f mm".format(it) } ?: "此點無有效值",
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            if (state.legendExpanded) WeatherLegend(WeatherUnit.MILLIMETERS_ONE_HOUR)
+    DockedMapBottomBar(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(TIMELINE_ROW_TOUCH_HEIGHT)
+                .padding(top = TIMELINE_TOUCH_OVERHANG, start = 14.dp, end = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Default.WaterDrop,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "未來 1 小時累積雨量",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                grid?.sourceId ?: "等待 F-B0046-001 數值格點",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                amount?.let { "%.1f mm".format(it) } ?: "此點無有效值",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (state.legendExpanded) {
+            WeatherLegend(
+                unit = WeatherUnit.MILLIMETERS_ONE_HOUR,
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 6.dp),
+            )
         }
     }
 }
@@ -2277,73 +2317,312 @@ private fun TimelineControls(
     timelineMinute: Float,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = .96f),
-        tonalElevation = 2.dp,
-    ) {
-        Column(Modifier.padding(horizontal = 8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                verticalAlignment = Alignment.CenterVertically,
+    val stepCount = OBSERVATION_HISTORY_MINUTES / OBSERVATION_FRAME_INTERVAL_MINUTES
+    val timeLabel = if (state.selectedMinute < 0) "${-state.selectedMinute} 分前" else "現在"
+    DockedMapBottomBar(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(TIMELINE_ROW_TOUCH_HEIGHT)
+                .padding(start = 4.dp, end = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TimelinePlayButton(
+                isPlaying = state.isPlaying,
+                isPending = state.isPlaybackPending,
+                onClick = viewModel::togglePlayback,
+            )
+            Box(
+                modifier = Modifier
+                    .padding(top = TIMELINE_TOUCH_OVERHANG)
+                    .width(52.dp),
+                contentAlignment = Alignment.CenterStart,
             ) {
-                IconButton(
-                    onClick = viewModel::togglePlayback,
-                    modifier = Modifier.size(48.dp),
-                ) {
-                    if (state.isPlaybackPending) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(22.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    } else {
-                        Icon(
-                            if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            if (state.isPlaying) "暫停" else "播放",
-                        )
-                    }
-                }
-                Column(Modifier.width(68.dp)) {
-                    Text(
-                        "過去 ${OBSERVATION_HISTORY_MINUTES} 分",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                    Text(
-                        if (state.selectedMinute < 0) "${-state.selectedMinute} 分前" else "現在",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                    )
-                }
-                Slider(
-                    value = timelineMinute,
-                    onValueChange = {
-                        viewModel.setMinute(
-                            (it / OBSERVATION_FRAME_INTERVAL_MINUTES).roundToInt() *
-                                OBSERVATION_FRAME_INTERVAL_MINUTES,
-                        )
-                    },
-                    valueRange = -OBSERVATION_HISTORY_MINUTES.toFloat()..0f,
-                    steps = OBSERVATION_HISTORY_MINUTES / OBSERVATION_FRAME_INTERVAL_MINUTES - 1,
-                    modifier = Modifier
-                        .weight(1f)
-                        .semantics {
-                            contentDescription =
-                                "過去 ${OBSERVATION_HISTORY_MINUTES} 分鐘至現在的觀測時間軸"
-                        },
+                Text(
+                    text = timeLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
                 )
             }
-            if (state.legendExpanded) WeatherLegend(state.activeGrid?.unit ?: WeatherUnit.MILLIMETERS_PER_HOUR)
+            TimelineScrubber(
+                value = timelineMinute,
+                valueRange = -OBSERVATION_HISTORY_MINUTES.toFloat()..0f,
+                stepCount = stepCount,
+                majorStepEvery = 3,
+                visualTopInset = TIMELINE_TOUCH_OVERHANG,
+                onValueChange = { raw ->
+                    viewModel.setMinute(
+                        (raw / OBSERVATION_FRAME_INTERVAL_MINUTES).roundToInt() *
+                            OBSERVATION_FRAME_INTERVAL_MINUTES,
+                    )
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .semantics {
+                        contentDescription = "過去 ${OBSERVATION_HISTORY_MINUTES} 分鐘至現在的觀測時間軸"
+                        stateDescription = timeLabel
+                    },
+            )
+        }
+        if (state.legendExpanded) {
+            WeatherLegend(
+                unit = state.activeGrid?.unit ?: WeatherUnit.MILLIMETERS_PER_HOUR,
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 6.dp),
+            )
         }
     }
 }
 
 @Composable
-private fun WeatherLegend(unit: WeatherUnit) {
+private fun TimelinePlayButton(
+    isPlaying: Boolean,
+    isPending: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val colors = MaterialTheme.colorScheme
+    val pillColor by animateColorAsState(
+        targetValue = if (isPlaying) colors.primaryContainer else colors.surfaceVariant.copy(alpha = .75f),
+        label = "timeline-play-pill",
+    )
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .semantics {
+                contentDescription = if (isPlaying) "暫停" else "播放"
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = TIMELINE_TOUCH_OVERHANG)
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(pillColor)
+                .indication(interactionSource, ripple(color = colors.primary)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isPending) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 1.8.dp,
+                    color = colors.primary,
+                )
+            } else {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp),
+                    tint = colors.primary,
+                )
+            }
+        }
+    }
+}
+
+internal fun snapTimelineValue(
+    rawValue: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    stepCount: Int,
+): Float {
+    val clamped = rawValue.coerceIn(valueRange.start, valueRange.endInclusive)
+    if (stepCount <= 0) return clamped
+    val span = valueRange.endInclusive - valueRange.start
+    if (span <= 0f) return valueRange.start
+    val stepIndex = (((clamped - valueRange.start) / span) * stepCount)
+        .roundToInt()
+        .coerceIn(0, stepCount)
+    return valueRange.start + (span * stepIndex) / stepCount
+}
+
+internal fun timelineValueForX(
+    x: Float,
+    widthPx: Int,
+    horizontalInsetPx: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+): Float {
+    val trackWidth = (widthPx - 2f * horizontalInsetPx).coerceAtLeast(1f)
+    val fraction = ((x - horizontalInsetPx) / trackWidth).coerceIn(0f, 1f)
+    return valueRange.start + fraction * (valueRange.endInclusive - valueRange.start)
+}
+
+@Composable
+internal fun TimelineScrubber(
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    stepCount: Int,
+    onValueChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    majorStepEvery: Int = 3,
+    enabled: Boolean = true,
+    visualTopInset: androidx.compose.ui.unit.Dp = 0.dp,
+) {
+    val haptics = LocalHapticFeedback.current
+    val currentOnValueChange by rememberUpdatedState(onValueChange)
+    var dragging by remember { mutableStateOf(false) }
+    val activeScale by animateFloatAsState(
+        targetValue = if (dragging) 1.24f else 1f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
+        label = "scrubber-thumb-scale",
+    )
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.surface.luminance() < .5f
+    val inactiveTrackColor = colors.onSurfaceVariant.copy(alpha = if (dark) .26f else .20f)
+    val activeTrackColor = colors.primary.copy(alpha = if (dark) .78f else .70f)
+    val inactiveTickColor = colors.onSurfaceVariant.copy(alpha = if (dark) .46f else .38f)
+    val activeTickColor = colors.primary
+    val surfaceCutoutColor = colors.surface
+    val thumbColor = if (enabled) colors.primary else colors.onSurfaceVariant.copy(alpha = .45f)
+
+    val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(1e-5f)
+    val fraction = ((value - valueRange.start) / span).coerceIn(0f, 1f)
+
+    Canvas(
+        modifier = modifier
+            .semantics {
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    current = value.coerceIn(valueRange.start, valueRange.endInclusive),
+                    range = valueRange,
+                    steps = (stepCount - 1).coerceAtLeast(0),
+                )
+                if (enabled) {
+                    setProgress { target ->
+                        currentOnValueChange(snapTimelineValue(target, valueRange, stepCount))
+                        true
+                    }
+                }
+            }
+            .pointerInput(enabled, valueRange, stepCount) {
+                if (!enabled) return@pointerInput
+                val insetPx = TIMELINE_TRACK_HORIZONTAL_INSET.toPx()
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    dragging = true
+                    val initial = snapTimelineValue(
+                        rawValue = timelineValueForX(down.position.x, size.width, insetPx, valueRange),
+                        valueRange = valueRange,
+                        stepCount = stepCount,
+                    )
+                    var lastSnapped = initial
+                    currentOnValueChange(initial)
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                                ?: event.changes.firstOrNull()
+                            if (change == null || !change.pressed) break
+                            change.consume()
+                            val next = snapTimelineValue(
+                                rawValue = timelineValueForX(change.position.x, size.width, insetPx, valueRange),
+                                valueRange = valueRange,
+                                stepCount = stepCount,
+                            )
+                            if (abs(next - lastSnapped) > 1e-4f) {
+                                lastSnapped = next
+                                haptics.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
+                                currentOnValueChange(next)
+                            }
+                        }
+                    } finally {
+                        dragging = false
+                    }
+                }
+            },
+    ) {
+        val insetPx = TIMELINE_TRACK_HORIZONTAL_INSET.toPx()
+        val startX = insetPx
+        val endX = (size.width - insetPx).coerceAtLeast(startX + 1f)
+        val trackWidth = endX - startX
+        val topInsetPx = visualTopInset.toPx().coerceIn(0f, size.height)
+        val centerY = topInsetPx + (size.height - topInsetPx) / 2f
+        val thumbX = startX + fraction * trackWidth
+        val trackStroke = 3.dp.toPx()
+
+        // Base track
+        drawLine(
+            color = inactiveTrackColor,
+            start = Offset(startX, centerY),
+            end = Offset(endX, centerY),
+            strokeWidth = trackStroke,
+            cap = StrokeCap.Round,
+        )
+        // Active progress fill
+        if (enabled && thumbX > startX + 0.5f) {
+            drawLine(
+                color = activeTrackColor,
+                start = Offset(startX, centerY),
+                end = Offset(thumbX, centerY),
+                strokeWidth = trackStroke,
+                cap = StrokeCap.Round,
+            )
+        }
+
+        // Frame step ticks
+        if (stepCount > 0) {
+            for (i in 0..stepCount) {
+                val stepFraction = i.toFloat() / stepCount
+                val tickX = startX + stepFraction * trackWidth
+                val reached = enabled && stepFraction <= fraction + 0.001f
+                val isMajor = majorStepEvery > 0 && (i % majorStepEvery == 0 || i == stepCount)
+                val color = if (reached) activeTickColor else inactiveTickColor
+                if (isMajor) {
+                    val halfTick = 3.5.dp.toPx()
+                    drawLine(
+                        color = color,
+                        start = Offset(tickX, centerY - halfTick),
+                        end = Offset(tickX, centerY + halfTick),
+                        strokeWidth = 1.6.dp.toPx(),
+                        cap = StrokeCap.Round,
+                    )
+                } else {
+                    drawCircle(
+                        color = color,
+                        radius = 1.3.dp.toPx(),
+                        center = Offset(tickX, centerY),
+                    )
+                }
+            }
+        }
+
+        // Layered circular thumb (halo + surface cutout + primary core)
+        val thumbCenter = Offset(thumbX, centerY)
+        if (enabled) {
+            drawCircle(
+                color = thumbColor.copy(alpha = if (dragging) (if (dark) .32f else .24f) else (if (dark) .20f else .14f)),
+                radius = 7.5.dp.toPx() * activeScale,
+                center = thumbCenter,
+            )
+        }
+        drawCircle(
+            color = surfaceCutoutColor,
+            radius = 5.dp.toPx() * activeScale,
+            center = thumbCenter,
+        )
+        drawCircle(
+            color = thumbColor,
+            radius = 3.5.dp.toPx() * activeScale,
+            center = thumbCenter,
+        )
+    }
+}
+
+@Composable
+internal fun WeatherLegend(
+    unit: WeatherUnit,
+    modifier: Modifier = Modifier,
+    customLabels: List<String>? = null,
+) {
     val renderTheme = if (MaterialTheme.colorScheme.background.luminance() < .35f) RenderTheme.DARK else RenderTheme.LIGHT
     val colors = if (unit == WeatherUnit.LUMINANCE) {
         CloudEnhancedPalette.colors(renderTheme)
@@ -2351,18 +2630,38 @@ private fun WeatherLegend(unit: WeatherUnit) {
         listOf(0xFF37D6E6, 0xFF4169D8, 0xFF6D3AC6, 0xFFB62B96, 0xFFE64A54, 0xFFF49A38, 0xFFFFF1B5)
             .map(Long::toInt)
     }
-    val labels = when (unit) {
+    val labels = customLabels ?: when (unit) {
         WeatherUnit.DBZ -> listOf("5", "15", "25", "35", "45", "55", "65 dBZ")
         WeatherUnit.MILLIMETERS_PER_HOUR -> listOf("0.1", "0.5", "2.5", "10", "25", "50", "100 mm/h")
         WeatherUnit.MILLIMETERS_ONE_HOUR -> listOf("0.1", "0.5", "2.5", "10", "25", "50", "100 mm/1h")
         WeatherUnit.MILLIMETERS_TWELVE_HOURS -> listOf("0.1", "0.5", "2.5", "10", "25", "50", "100+ mm/12h")
         WeatherUnit.LUMINANCE -> listOf("低亮", "", "", "雲頂", "", "", "高亮")
     }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        colors.forEachIndexed { index, value ->
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.size(width = 30.dp, height = 7.dp).background(Color(value), RoundedCornerShape(2.dp)))
-                Text(labels[index], fontSize = 8.sp)
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(99.dp)),
+            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+        ) {
+            colors.forEach { value ->
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(Color(value)),
+                )
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            labels.forEach { label ->
+                Text(
+                    text = label,
+                    fontSize = 9.sp,
+                    lineHeight = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

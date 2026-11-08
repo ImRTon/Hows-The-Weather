@@ -1,6 +1,8 @@
 package com.rton.howstheweather
 
 import com.rton.howstheweather.data.WeatherHistoryKind
+import com.rton.howstheweather.ui.snapTimelineValue
+import com.rton.howstheweather.ui.timelineValueForX
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -30,5 +32,21 @@ class PlaybackTimelineTest {
 
         assertFalse(isObservationMinuteAvailable(now, framesWithoutTarget, minute = -90))
         assertTrue(isObservationMinuteAvailable(now, framesWithTarget, minute = -90))
+    }
+
+    @Test fun `custom timeline scrubber snaps to discrete frame intervals and clamps bounds`() {
+        val range = -90f..0f
+        assertEquals(-90f, snapTimelineValue(-120f, range, stepCount = 9), 1e-4f)
+        assertEquals(-90f, snapTimelineValue(-86f, range, stepCount = 9), 1e-4f)
+        assertEquals(-80f, snapTimelineValue(-84f, range, stepCount = 9), 1e-4f)
+        assertEquals(-30f, snapTimelineValue(-28f, range, stepCount = 9), 1e-4f)
+        assertEquals(0f, snapTimelineValue(15f, range, stepCount = 9), 1e-4f)
+
+        val mappedStart = timelineValueForX(x = 8f, widthPx = 200, horizontalInsetPx = 8f, valueRange = range)
+        val mappedMid = timelineValueForX(x = 100f, widthPx = 200, horizontalInsetPx = 8f, valueRange = range)
+        val mappedEnd = timelineValueForX(x = 192f, widthPx = 200, horizontalInsetPx = 8f, valueRange = range)
+        assertEquals(-90f, mappedStart, 1e-4f)
+        assertEquals(-45f, mappedMid, 1e-4f)
+        assertEquals(0f, mappedEnd, 1e-4f)
     }
 }
