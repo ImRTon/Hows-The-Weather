@@ -1,0 +1,60 @@
+{
+  "layout": "latest_taiwan",
+  "dataset": "O-C0042-004",
+  "status": "DRAFT_INSUFFICIENT_HISTORY",
+  "sample_count": 4,
+  "unique_observations": 4,
+  "span_hours": 22.666666666666668,
+  "size": [
+    800,
+    800
+  ],
+  "crop": [
+    5,
+    36,
+    795,
+    778
+  ],
+  "logo_exclusion": [
+    7,
+    752,
+    72,
+    796
+  ],
+  "annotation_pixels": 33696,
+  "annotation_fraction": 0.05265,
+  "excluded_fraction": 0.086734375,
+  "minimum_samples": 12,
+  "minimum_span_hours": 6,
+  "algorithm": "persistent-ridge-connected-v1; no dilation; native pixels",
+  "preview_observed_at": "2026-11-10T20:40:00+08:00",
+  "samples": [
+    {
+      "observed_at": "2026-11-09T22:00:00+08:00",
+      "origin": "previous local download",
+      "sha256": "69c454086309ef24424fabadb982b9b1d59050c89205f7153a34c2a9c574eb2b",
+      "archive_image": "build/cloud-debug/native-archive/O-C0042-004/20261109T220000+0800.jpg"
+    },
+    {
+      "observed_at": "2026-11-10T17:40:00+08:00",
+      "origin": "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-C0042-004.jpg",
+      "sha256": "55a401623de6d88d45d8af77348866961a52606d6010440dd54689e77a6a7025",
+      "archive_image": "build/cloud-debug/native-archive/O-C0042-004/20261110T174000+0800.jpg"
+    },
+    {
+      "observed_at": "2026-11-10T19:40:00+08:00",
+      "origin": "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-C0042-004.jpg",
+      "sha256": "e65d173634227dd104ae735c41e268af91ec77b5a76d757800581bb6b6ffdb40",
+      "archive_image": "build/cloud-debug/native-archive/O-C0042-004/20261110T194000+0800.jpg"
+    },
+    {
+      "observed_at": "2026-11-10T20:40:00+08:00",
+      "origin": "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-C0042-004.jpg",
+      "sha256": "ea40b5c106ae077453ed1772b2c9e45e145408d0a6ad08a33c7250aba50ae52b",
+      "archive_image": "build/cloud-debug/native-archive/O-C0042-004/20261110T204000+0800.jpg"
+    }
+  ],
+  "source": "CWA fileapi latest native product; NOT website animation",
+  "source_id": "O-C0042-004|fileapi-native",
+  "baseline": 86
+}

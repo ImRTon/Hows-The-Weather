@@ -1,0 +1,60 @@
+{
+  "layout": "latest_east_asia",
+  "dataset": "O-B0032-003",
+  "status": "DRAFT_INSUFFICIENT_HISTORY",
+  "sample_count": 4,
+  "unique_observations": 4,
+  "span_hours": 22.333333333333332,
+  "size": [
+    1200,
+    1200
+  ],
+  "crop": [
+    1,
+    55,
+    1199,
+    1176
+  ],
+  "logo_exclusion": [
+    10,
+    1128,
+    77,
+    1172
+  ],
+  "annotation_pixels": 90428,
+  "annotation_fraction": 0.06279722222222223,
+  "excluded_fraction": 0.0694375,
+  "minimum_samples": 12,
+  "minimum_span_hours": 6,
+  "algorithm": "persistent-ridge-connected-v1; no dilation; native pixels",
+  "preview_observed_at": "2026-11-10T20:40:00+08:00",
+  "samples": [
+    {
+      "observed_at": "2026-11-09T22:20:00+08:00",
+      "origin": "previous local download",
+      "sha256": "32cc5ff30992092747af0308cbb2552932689158cf09dcdbcdd9a4ba8e0ffcff",
+      "archive_image": "build/cloud-debug/native-archive/O-B0032-003/20261109T222000+0800.jpg"
+    },
+    {
+      "observed_at": "2026-11-10T19:30:00+08:00",
+      "origin": "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-B0032-003.jpg",
+      "sha256": "b5655c59bb71936f418d5f4297490bdffffe96d5da4becce1245e14f1459d11d",
+      "archive_image": "build/cloud-debug/native-archive/O-B0032-003/20261110T193000+0800.jpg"
+    },
+    {
+      "observed_at": "2026-11-10T19:40:00+08:00",
+      "origin": "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-B0032-003.jpg",
+      "sha256": "967b64f6797c9a9261e5d93732250f2875d5492afbb33cd1239877ab3aa85c76",
+      "archive_image": "build/cloud-debug/native-archive/O-B0032-003/20261110T194000+0800.jpg"
+    },
+    {
+      "observed_at": "2026-11-10T20:40:00+08:00",
+      "origin": "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-B0032-003.jpg",
+      "sha256": "9ed030849404a8d121f097cbab792fe09f991e05976e837aacce15ea1ced166f",
+      "archive_image": "build/cloud-debug/native-archive/O-B0032-003/20261110T204000+0800.jpg"
+    }
+  ],
+  "source": "CWA fileapi latest native product; NOT website animation",
+  "source_id": "O-B0032-003|fileapi-native",
+  "baseline": 82
+}

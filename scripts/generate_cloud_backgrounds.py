@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Build fixed CWA satellite basemap estimates from public animation frames.
+"""Extract fixed satellite cartography from a time series, independently of clouds.
 
-The CWA grayscale infrared JPG products composite a temperature-dependent cloud
-layer over fixed cartography. A per-pixel temporal mode is therefore a useful
-estimate of that fixed background. The generated grayscale PNGs are consumed
-only by the experimental cloud visualization; they must not feed rain decisions.
+Only persistent, narrow bright features become annotation masks. A temporal mode
+of the whole image must not be used as a mask: slow clouds survive that statistic.
+Outputs are used only by the experimental cloud visualization.
 """
 
 from __future__ import annotations
 
 import argparse
 import io
+import json
 import re
+import ssl
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -43,7 +44,11 @@ PRODUCTS = (
 
 def download(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "HowsTheWeather-background-builder/1"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    context = ssl.create_default_context()
+    # Python 3.13's stricter X.509 extension checks reject CWA's certificate.
+    # Keep certificate-chain and hostname verification enabled.
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    with urllib.request.urlopen(request, timeout=30, context=context) as response:
         return response.read()
 
 
@@ -72,32 +77,67 @@ def decode_luminance(data: bytes, expected_size: tuple[int, int]) -> np.ndarray:
     ).astype(np.uint8)
 
 
-def temporal_mode(frames: np.ndarray, bin_width: int = 4, rows_per_chunk: int = 32) -> np.ndarray:
-    """Returns the center of the densest luminance bin for every source pixel."""
-    _, height, width = frames.shape
-    bin_count = (256 + bin_width - 1) // bin_width
-    result = np.empty((height, width), dtype=np.uint8)
-    for top in range(0, height, rows_per_chunk):
-        bottom = min(height, top + rows_per_chunk)
-        chunk = frames[:, top:bottom, :]
-        pixel_count = (bottom - top) * width
-        pixel_indices = np.arange(pixel_count)
-        counts = np.zeros((bin_count, pixel_count), dtype=np.uint16)
-        for frame in chunk:
-            bins = (frame.reshape(-1) // bin_width).astype(np.intp)
-            np.add.at(counts, (bins, pixel_indices), 1)
-        winning_bins = counts.argmax(axis=0).astype(np.uint8)
-        result[top:bottom, :] = (
-            winning_bins.reshape(bottom - top, width) * bin_width + bin_width // 2
-        ).clip(0, 255)
-    return result
+def annotation_mask(frames: np.ndarray) -> np.ndarray:
+    """Require temporal persistence AND thin-line contrast, not just brightness."""
+    low, high = np.percentile(frames, [5, 95], axis=0)
+    contrast_votes = np.zeros(frames.shape[1:], dtype=np.uint16)
+    for frame in frames:
+        padded = np.pad(frame.astype(np.int16), 2, mode="edge")
+        # A thin ridge is brighter than BOTH sides of at least one axis. A broad
+        # bright cloud edge has a bright interior on one side and fails this test.
+        ridge_background = np.minimum(
+            np.maximum(padded[2:-2, :-4], padded[2:-2, 4:]),
+            np.maximum(padded[:-4, 2:-2], padded[4:, 2:-2]),
+        )
+        contrast_votes += (frame.astype(np.int16) - ridge_background >= 18)
+    stable_bright = (low >= 225) & (high - low <= 24)
+    core = stable_bright & (contrast_votes >= len(frames) * 0.25)
+
+    def neighbors(mask: np.ndarray) -> np.ndarray:
+        padded = np.pad(mask, 1)
+        return np.logical_or.reduce([
+            padded[dy:dy + mask.shape[0], dx:dx + mask.shape[1]]
+            for dy in range(3) for dx in range(3)
+        ])
+
+    # Recover thicker coastline junctions only along connected persistent white
+    # pixels. This cannot grow across a normal gray cloud/background pixel.
+    while True:
+        expanded = core | (neighbors(core) & stable_bright)
+        if np.array_equal(expanded, core):
+            break
+        core = expanded
+    adjacent = neighbors(core)
+    # Include only persistent antialiased edge pixels immediately next to a core.
+    # There is no unconditional dilation into normal cloud pixels.
+    return core | (adjacent & (low >= 120) & (high - low <= 24))
 
 
-def build_product(product: Product, script: str, sample_count: int, output_dir: Path) -> None:
+def exclusion_mask(width: int, height: int) -> np.ndarray:
+    """The reviewed animation title, one-pixel frame, and tightly bounded logo."""
+    mask = np.zeros((height, width), dtype=bool)
+    mask[:round(height * 0.03), :] = True
+    mask[-1, :] = True
+    mask[:, :1] = True
+    mask[:, -1:] = True
+    logo = {(800, 800): (7, 752, 72, 796), (1000, 1000): (8, 940, 75, 985)}[(width, height)]
+    left, top, right, bottom = logo
+    mask[top:bottom, left:right] = True
+    return mask
+
+
+def build_product(
+    product: Product, script: str, sample_count: int, output_dir: Path, cache_dir: Path,
+    manifest_dir: Path = Path("docs/cloud-templates"),
+) -> None:
     paths = frame_paths(script, product.prefix, sample_count)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     def load(index_and_path: tuple[int, str]) -> tuple[int, np.ndarray]:
         index, path = index_and_path
-        data = download(f"{ANIMATION_BASE_URL}/{path}")
+        cached = cache_dir / Path(path).name
+        if not cached.exists():
+            cached.write_bytes(download(f"{ANIMATION_BASE_URL}/{path}"))
+        data = cached.read_bytes()
         return index, decode_luminance(data, product.expected_size)
 
     with ThreadPoolExecutor(max_workers=6) as executor:
@@ -105,27 +145,51 @@ def build_product(product: Product, script: str, sample_count: int, output_dir: 
     loaded.sort(key=lambda item: item[0])
     frames = np.stack([frame for _, frame in loaded])
 
-    background = temporal_mode(frames)
+    annotations = annotation_mask(frames)
+    exclusions = exclusion_mask(*product.expected_size)
+    annotations &= ~exclusions
+    # Use a scalar clear-sky floor; a per-pixel background can contain persistent
+    # clouds and would subtract real cloud structure even with a correct mask.
+    baseline = int(np.percentile(frames[:, ~annotations & ~exclusions], 5))
+    background = np.full(frames.shape[1:], baseline, dtype=np.uint8)
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / product.output_name
     Image.fromarray(background).save(output, optimize=True)
-    print(f"{product.prefix}: {len(paths)} frames -> {output}")
+    stem = product.output_name.removeprefix("cloud_background_").removesuffix(".png")
+    Image.fromarray(annotations.astype(np.uint8) * 255).save(output_dir / f"cloud_annotations_{stem}.png", optimize=True)
+    Image.fromarray(exclusions.astype(np.uint8) * 255).save(output_dir / f"cloud_exclusions_{stem}.png", optimize=True)
+    manifest = json.dumps({
+        "algorithm": "persistent-ridge-connected-v1",
+        "paths": paths, "sample_count": len(paths), "size": product.expected_size,
+        "low_percentile": 5, "high_percentile": 95, "min_core_luminance": 225,
+        "max_luminance_spread": 24, "min_ridge_contrast": 18, "min_ridge_fraction": 0.25,
+        "antialias_min_luminance": 120, "unconditional_dilation": 0,
+        "baseline": baseline, "annotation_pixels": int(annotations.sum()),
+        "excluded_pixels": int(exclusions.sum()),
+        "source": "CWA website animation for both latest and historical frames",
+        "crop": [1, round(product.expected_size[1] * 0.03), product.expected_size[0] - 1, product.expected_size[1] - 1],
+    }, indent=2)
+    (cache_dir / f"{stem}_manifest.json").write_text(manifest, encoding="utf-8")
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / f"{stem}.json").write_text(manifest, encoding="utf-8")
+    print(f"{product.prefix}: {len(paths)} frames, floor={baseline}, annotation={annotations.mean():.2%}, excluded={exclusions.mean():.2%} -> {output}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=144)
+    parser.add_argument("--cache-dir", type=Path, default=Path("build/cloud-debug/frames"))
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("app/src/main/res/raw"),
+        default=Path("build/cloud-debug/animation-templates"),
     )
     args = parser.parse_args()
     if args.samples < 12:
         parser.error("--samples must be at least 12")
     script = download(ANIMATION_LIST_URL).decode("utf-8")
     for product in PRODUCTS:
-        build_product(product, script, args.samples, args.output_dir)
+        build_product(product, script, args.samples, args.output_dir, args.cache_dir)
 
 
 if __name__ == "__main__":
