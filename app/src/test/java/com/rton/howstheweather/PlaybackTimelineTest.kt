@@ -18,11 +18,12 @@ class PlaybackTimelineTest {
         assertEquals(0, nextObservationFrameMinute(0))
     }
 
-    @Test fun `playback requires the complete ninety minute sequence`() {
+    @Test fun `radar playback requires the complete sequence and cloud playback stays disabled`() {
         assertFalse(hasCompleteHistoryForPlayback(WeatherHistoryKind.RADAR, frameCount = 8))
         assertTrue(hasCompleteHistoryForPlayback(WeatherHistoryKind.RADAR, frameCount = 9))
         assertFalse(hasCompleteHistoryForPlayback(WeatherHistoryKind.CLOUD, frameCount = 9))
-        assertTrue(hasCompleteHistoryForPlayback(WeatherHistoryKind.CLOUD, frameCount = 10))
+        assertFalse(hasCompleteHistoryForPlayback(WeatherHistoryKind.CLOUD, frameCount = 10))
+        assertFalse(hasCompleteHistoryForPlayback(WeatherHistoryKind.CLOUD, frameCount = 100))
     }
 
     @Test fun `scrubbing stops loading only when the selected minute arrives`() {

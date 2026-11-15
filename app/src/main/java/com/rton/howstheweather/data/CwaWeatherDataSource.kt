@@ -31,6 +31,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Cache
+import okhttp3.CacheControl
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -40,6 +41,8 @@ import okhttp3.Response
 import java.io.File
 import java.io.IOException
 import java.time.Duration
+import java.time.Clock
+import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
@@ -67,6 +70,7 @@ class CwaWeatherDataSource(
     private val areaForecastParser: CwaAreaForecastParser = CwaAreaForecastParser(),
     private val tropicalCycloneParser: CwaTropicalCycloneParser = CwaTropicalCycloneParser(),
     satelliteImageParserFactory: () -> CwaSatelliteImageParser = { satelliteImageParser },
+    private val clock: Clock = Clock.systemUTC(),
 ) : WeatherDataSource {
     // First accessed by satellite acquisition on IO, never during ViewModel construction.
     private val satelliteImageParser by lazy(satelliteImageParserFactory)
@@ -97,6 +101,7 @@ class CwaWeatherDataSource(
     private val historyLoadSemaphore = Semaphore(HISTORY_DOWNLOAD_CONCURRENCY)
     private val quantitativeLoadSemaphore = Semaphore(QUANTITATIVE_DOWNLOAD_CONCURRENCY)
     private val animationCacheMutex = Mutex()
+    private val animationScriptCache = ConcurrentHashMap<String, AnimationScript>()
     private val countyForecastLocationsMutex = Mutex()
     @Volatile
     private var countyForecastLocations: List<CwaForecastLocation>? = null
@@ -271,7 +276,7 @@ class CwaWeatherDataSource(
 
         launch {
             val taiwanResult = catchingCancellable {
-                fetchSatelliteFrame(TAIWAN_CLOUD_DATASET_ID, CLOUD_LOCAL_MAX_DIMENSION)
+                fetchSatelliteFrame(CwaSatelliteProduct.TAIWAN)
             }
             val taiwanCurrent = taiwanResult.getOrNull()?.let(::listOf)
                 ?: snapshot.cloudRegionalFrames
@@ -293,7 +298,7 @@ class CwaWeatherDataSource(
             }
 
             val eastAsiaResult = catchingCancellable {
-                fetchSatelliteFrame(EAST_ASIA_CLOUD_DATASET_ID, CLOUD_EAST_ASIA_MAX_DIMENSION)
+                fetchSatelliteFrame(CwaSatelliteProduct.EAST_ASIA)
             }
             val eastAsiaCurrent = eastAsiaResult.getOrNull()?.let(::listOf)
                 ?: snapshot.cloudFrames
@@ -443,94 +448,11 @@ class CwaWeatherDataSource(
                     )
                 }
 
-                WeatherHistoryKind.CLOUD -> {
-                    val taiwanCurrent = snapshot.cloudRegionalFrames.maxByOrNull(WeatherGrid::validAt)
-                    val eastAsiaCurrent = snapshot.cloudFrames.maxByOrNull(WeatherGrid::validAt)
-                    if (taiwanCurrent == null && eastAsiaCurrent == null) {
-                        send(snapshot)
-                        return@channelFlow
-                    }
-                    val timeline = ObservedWeatherTimeline()
-                    val updatesMutex = Mutex()
-                    var taiwanFrames = snapshot.cloudRegionalFrames
-                    var eastAsiaFrames = snapshot.cloudFrames
-                    suspend fun publishCloudUpdate() {
-                        val harmonizedTaiwan = if (taiwanFrames.isNotEmpty() && eastAsiaFrames.isNotEmpty()) {
-                            withContext(PREPROCESSING_DISPATCHER) {
-                                cloudGridHarmonizer.harmonize(taiwanFrames, eastAsiaFrames)
-                            }
-                        } else {
-                            taiwanFrames
-                        }
-                        send(
-                            snapshot.copy(
-                                cloudFrames = eastAsiaFrames,
-                                cloudRegionalFrames = harmonizedTaiwan,
-                            ),
-                        )
-                    }
-                    val taiwanRequest = async {
-                        taiwanCurrent?.let {
-                            catchingCancellable {
-                                fetchSatelliteHistory(
-                                    it,
-                                    TAIWAN_CLOUD_DATASET_ID,
-                                    TAIWAN_CLOUD_FILE_PREFIX,
-                                    CLOUD_LOCAL_MAX_DIMENSION,
-                                ) { frame ->
-                                    updatesMutex.withLock {
-                                        taiwanFrames = timeline.merge(it, taiwanFrames + frame)
-                                        publishCloudUpdate()
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    val eastAsiaRequest = async {
-                        eastAsiaCurrent?.let {
-                            catchingCancellable {
-                                fetchSatelliteHistory(
-                                    it,
-                                    EAST_ASIA_CLOUD_DATASET_ID,
-                                    EAST_ASIA_CLOUD_FILE_PREFIX,
-                                    CLOUD_EAST_ASIA_MAX_DIMENSION,
-                                ) { frame ->
-                                    updatesMutex.withLock {
-                                        eastAsiaFrames = timeline.merge(it, eastAsiaFrames + frame)
-                                        publishCloudUpdate()
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    val taiwanResult = taiwanRequest.await()
-                    val eastAsiaResult = eastAsiaRequest.await()
-                    eastAsiaFrames = eastAsiaResult?.getOrElse { snapshot.cloudFrames }
-                        ?: snapshot.cloudFrames
-                    taiwanFrames = taiwanResult?.getOrElse { snapshot.cloudRegionalFrames }
-                        ?: snapshot.cloudRegionalFrames
-                    val harmonizedTaiwan = if (taiwanFrames.isNotEmpty() && eastAsiaFrames.isNotEmpty()) {
-                        withContext(PREPROCESSING_DISPATCHER) {
-                            cloudGridHarmonizer.harmonize(taiwanFrames, eastAsiaFrames)
-                        }
-                    } else {
-                        taiwanFrames
-                    }
-                    send(
-                        snapshot.copy(
-                            cloudFrames = eastAsiaFrames,
-                            cloudRegionalFrames = harmonizedTaiwan,
-                            notice = snapshot.notice.appendFailures(
-                                taiwanResult?.exceptionOrNull()?.let {
-                                    "台灣衛星歷史失敗：${it.message ?: "未知錯誤"}"
-                                },
-                                eastAsiaResult?.exceptionOrNull()?.let {
-                                    "東亞衛星歷史失敗：${it.message ?: "未知錯誤"}"
-                                },
-                            ),
-                        ),
-                    )
-                }
+                // Latest-only clouds: never enqueue historical image downloads.
+                WeatherHistoryKind.CLOUD -> send(snapshot.copy(
+                    cloudFrames = listOfNotNull(snapshot.cloudFrames.maxByOrNull(WeatherGrid::validAt)),
+                    cloudRegionalFrames = listOfNotNull(snapshot.cloudRegionalFrames.maxByOrNull(WeatherGrid::validAt)),
+                ))
             }
         }
 
@@ -661,53 +583,17 @@ class CwaWeatherDataSource(
     }
 
     private suspend fun fetchSatelliteFrame(
-        datasetId: String,
-        maxGridDimension: Int,
+        product: CwaSatelliteProduct,
     ): WeatherGrid {
-        val metadata = withContext(Dispatchers.IO) {
-            fetchBody(datasetId, "JSON").use { satelliteImageParser.parseMetadata(it.string()) }
-        }
-        return decodeSatelliteImage(metadata, datasetId, maxGridDimension)
+        return decodeSatelliteImage(fetchSatelliteMetadata(product), product)
     }
 
-    private suspend fun fetchSatelliteHistory(
-        current: WeatherGrid,
-        datasetId: String,
-        animationFilePrefix: String,
-        maxGridDimension: Int,
-        onFrame: suspend (WeatherGrid) -> Unit,
-    ): List<WeatherGrid> = coroutineScope {
-        val currentMetadata = CwaSatelliteImageMetadata(current.bounds, current.validAt, productUrl = "")
-        val records = withContext(Dispatchers.IO) {
-            fetchAnimationRecords(
-                listUrl = SATELLITE_ANIMATION_LIST_URL,
-                filePrefix = animationFilePrefix,
-                baseUrl = SATELLITE_ANIMATION_BASE_URL,
-                datasetId = datasetId,
-                currentAt = currentMetadata.observedAt,
-            )
+    internal suspend fun fetchSatelliteMetadata(
+        product: CwaSatelliteProduct,
+    ): CwaSatelliteImageMetadata = withContext(Dispatchers.IO) {
+        StartupDiagnostics.measureSuspending("satellite.metadata source=${product.datasetId}") {
+            fetchBody(product.datasetId, "JSON").use { satelliteImageParser.parseMetadata(it.string()) }
         }
-        val historical = records.map { record ->
-            async {
-                historyLoadSemaphore.withPermit {
-                    val frame = catchingCancellable {
-                        val metadata = satelliteMetadataForHistory(record, currentMetadata)
-                        decodeSatelliteImage(metadata, datasetId, maxGridDimension)
-                    }
-                        .getOrNull()
-                        ?.takeIf(WeatherGrid::isObservedFrame)
-                        ?.takeIf { it.validAt < current.validAt }
-                    frame?.let { onFrame(it) }
-                    frame
-                }
-            }
-        }.awaitAll().filterNotNull()
-        (historical + current)
-            .filter(WeatherGrid::isObservedFrame)
-            .filter { it.validAt <= current.validAt }
-            .distinctBy(WeatherGrid::validAt)
-            .sortedBy { it.validAt }
-            .takeLast(OBSERVATION_HISTORY_FRAME_COUNT)
     }
 
     private suspend fun radarMetadataForHistory(
@@ -717,17 +603,6 @@ class CwaWeatherDataSource(
         current.copy(observedAt = record.observedAt ?: current.observedAt, productUrl = record.url)
     } else {
         request(record.url).use { radarImageParser.parseMetadata(it.string()) }
-    }
-
-    private suspend fun satelliteMetadataForHistory(
-        record: CwaHistoryRecord,
-        current: CwaSatelliteImageMetadata,
-    ): CwaSatelliteImageMetadata = if (
-        record.url.substringBefore('?').let { it.endsWith(".jpg", true) || it.endsWith(".png", true) }
-    ) {
-        current.copy(observedAt = record.observedAt ?: current.observedAt, productUrl = record.url)
-    } else {
-        request(record.url).use { satelliteImageParser.parseMetadata(it.string()) }
     }
 
     private suspend fun decodeRadarImage(
@@ -756,8 +631,7 @@ class CwaWeatherDataSource(
 
     private suspend fun decodeSatelliteImage(
         metadata: CwaSatelliteImageMetadata,
-        datasetId: String,
-        maxGridDimension: Int,
+        product: CwaSatelliteProduct,
     ): WeatherGrid {
         val bytes = withContext(Dispatchers.IO) { request(metadata.productUrl).use { it.bytes() } }
         return withContext(PREPROCESSING_DISPATCHER) {
@@ -765,13 +639,10 @@ class CwaWeatherDataSource(
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             check(bounds.outWidth > 1 && bounds.outHeight > 1) { "CWA 衛星影像尺寸無效" }
-            val options = BitmapFactory.Options().apply {
-                inSampleSize = decodeSampleSize(
-                    bounds.outWidth,
-                    bounds.outHeight,
-                    targetDimension = maxGridDimension * SATELLITE_DECODE_OVERSAMPLE,
-                )
-            }
+            product.validateDimensions(bounds.outWidth, bounds.outHeight)
+            // Presentation lines must be removed at native resolution before any
+            // decoder downsampling can mix their white pixels into real cloud pixels.
+            val options = BitmapFactory.Options().apply { inSampleSize = 1 }
             val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
                 ?: error("CWA 衛星影像解碼失敗")
             try {
@@ -782,8 +653,7 @@ class CwaWeatherDataSource(
                     image.width,
                     image.height,
                     pixels,
-                    datasetId,
-                    maxGridDimension,
+                    product.sourceId,
                 ) {
                     processingContext.ensureActive()
                 }
@@ -826,15 +696,6 @@ class CwaWeatherDataSource(
         }.awaitAll()
     }
 
-    private fun decodeSampleSize(width: Int, height: Int, targetDimension: Int): Int {
-        var sampleSize = 1
-        val largestDimension = maxOf(width, height)
-        while (largestDimension / (sampleSize * 2) >= targetDimension) {
-            sampleSize *= 2
-        }
-        return sampleSize
-    }
-
     private suspend fun fetchHistoryRecords(datasetId: String, currentAt: java.time.Instant): List<CwaHistoryRecord> {
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss").withZone(TAIPEI_ZONE)
         val url = "https://opendata.cwa.gov.tw/historyapi/v1/getMetadata/$datasetId".toHttpUrl()
@@ -861,12 +722,7 @@ class CwaWeatherDataSource(
         currentAt: java.time.Instant,
     ): List<CwaHistoryRecord> {
         val animationRecords = catchingCancellable {
-            val cached = animationScriptCache[listUrl]
-            val script = cached ?: animationCacheMutex.withLock {
-                animationScriptCache[listUrl] ?: request(listUrl).use { it.string() }
-                    .also { animationScriptCache[listUrl] = it }
-            }
-            animationFrameParser.parse(script, filePrefix, baseUrl)
+            animationFrameParser.parse(fetchAnimationScript(listUrl), filePrefix, baseUrl)
         }.getOrDefault(emptyList())
         val candidates = animationRecords.ifEmpty { fetchHistoryRecords(datasetId, currentAt) }
         return candidates
@@ -879,6 +735,19 @@ class CwaWeatherDataSource(
             .sortedBy { it.observedAt }
             .takeLast(OBSERVATION_HISTORY_FRAME_COUNT - 1)
     }
+
+    /** Share one inventory between regions, but never pin "latest" for the process lifetime. */
+    private suspend fun fetchAnimationScript(listUrl: String): String = withContext(Dispatchers.IO) {
+        fun cached(): String? = animationScriptCache[listUrl]
+            ?.takeIf { clock.instant().isBefore(it.expiresAt) }?.script
+        cached() ?: animationCacheMutex.withLock {
+            cached() ?: request(listUrl, ANIMATION_LIST_CACHE_CONTROL).use { it.string() }.also {
+                animationScriptCache[listUrl] = AnimationScript(it, clock.instant().plus(ANIMATION_LIST_MAX_AGE))
+            }
+        }
+    }
+
+    private data class AnimationScript(val script: String, val expiresAt: Instant)
 
     private suspend fun fetchWindObservations() = withContext(Dispatchers.IO) {
         suspend fun fetch(elementFilter: Boolean): List<WindObservation> {
@@ -928,8 +797,9 @@ class CwaWeatherDataSource(
         )
 
     /** Response bodies must be read off the main thread; callers own that dispatch. */
-    private suspend fun request(url: String): okhttp3.ResponseBody {
-        val request = Request.Builder().url(url).build()
+    private suspend fun request(url: String, cacheControl: CacheControl? = null): okhttp3.ResponseBody {
+        val request = Request.Builder().url(url)
+            .apply { cacheControl?.let { cacheControl(it) } }.build()
         val response = execute(request)
         if (!response.isSuccessful) {
             response.close()
@@ -1007,25 +877,16 @@ class CwaWeatherDataSource(
         @Volatile var cachedModelWindRanges: ModelWindRanges? = null
         const val WIDE_RADAR_DATASET_ID = "O-A0058-005"
         const val LOCAL_RADAR_DATASET_ID = "O-A0058-006"
-        const val EAST_ASIA_CLOUD_DATASET_ID = "O-B0032-003"
-        const val TAIWAN_CLOUD_DATASET_ID = "O-C0042-004"
         val QUANTITATIVE_FORECAST_DATASET_IDS = listOf(
             "F-C0035-015", "F-C0035-017", "F-C0035-023", "F-C0035-024",
         )
         const val NATIONAL_THREE_DAY_FORECAST_ID = "F-D0047-089"
         const val RADAR_ANIMATION_LIST_URL = "https://www.cwa.gov.tw/Data/js/obs_img/Observe_radar.js"
         const val RADAR_ANIMATION_BASE_URL = "https://www.cwa.gov.tw/Data/radar"
-        const val SATELLITE_ANIMATION_LIST_URL = "https://www.cwa.gov.tw/Data/js/obs_img/Observe_sat.js"
-        const val SATELLITE_ANIMATION_BASE_URL = "https://www.cwa.gov.tw/Data/satellite"
         const val WIDE_RADAR_FILE_PREFIX = "CV1_3600_"
         const val LOCAL_RADAR_FILE_PREFIX = "CV1_TW_3600_"
-        const val EAST_ASIA_CLOUD_FILE_PREFIX = "LCC_IR1_Gray_1000-"
-        const val TAIWAN_CLOUD_FILE_PREFIX = "TWI_IR1_Gray_800-"
         const val RADAR_WIDE_SAMPLE_SIZE = 8
         const val RADAR_LOCAL_SAMPLE_SIZE = 4
-        const val CLOUD_EAST_ASIA_MAX_DIMENSION = 320
-        const val CLOUD_LOCAL_MAX_DIMENSION = 400
-        const val SATELLITE_DECODE_OVERSAMPLE = 2
         const val HISTORY_DOWNLOAD_CONCURRENCY = 3
         const val QUANTITATIVE_DOWNLOAD_CONCURRENCY = 2
         const val COUNTY_CANDIDATE_COUNT = 2
@@ -1059,7 +920,8 @@ class CwaWeatherDataSource(
             datasetId.dropLast(3) + number.toString().padStart(3, '0')
         }
         val TAIPEI_ZONE: ZoneId = ZoneId.of("Asia/Taipei")
-        val animationScriptCache = ConcurrentHashMap<String, String>()
+        val ANIMATION_LIST_MAX_AGE: Duration = Duration.ofMinutes(1)
+        val ANIMATION_LIST_CACHE_CONTROL: CacheControl = CacheControl.Builder().maxAge(1, TimeUnit.MINUTES).build()
         val PREPROCESSING_DISPATCHER = Dispatchers.Default.limitedParallelism(2)
     }
 }

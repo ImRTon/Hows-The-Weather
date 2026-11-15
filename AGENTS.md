@@ -22,7 +22,7 @@ The home screen is one vertically split workspace:
 - Drag and settle frames must not recompose the map: read the live panel height only in layout/draw lambdas. Summary/expanded content crossfades from the live height rather than switching at anchors.
 - Tapping the handle cycles through the same anchors.
 - Keep the visual divider between the decision card and map continuous across the full width; the short drag bar overlays that divider without creating a black gap.
-- The divider is also the primary-layer rail (`MapLayerRail`): an equal-width three-segment track (`廣域/區域雷達`, `1 小時`, `雲層 β`) with a sliding pill indicator, then a short drag pill in a strip directly below the segments. Vertical drags anywhere on the rail resize the panels; taps and horizontal swipes switch the layer, the indicator follows the finger, and a release snaps to the nearest segment (a fling advances at least one). The handle's 48 dp tap target starts below the segments, reaching down into the map, so it never covers a segment. The rail stays visible at every anchor.
+- The divider is also the primary-layer rail (`MapLayerRail`): an equal-width three-segment track (`廣域/區域雷達`, `1 小時`, `雲圖`) with a sliding pill indicator, then a short drag pill in a strip directly below the segments. Vertical drags anywhere on the rail resize the panels; taps and horizontal swipes switch the layer, the indicator follows the finger, and a release snaps to the nearest segment (a fling advances at least one). The handle's 48 dp tap target starts below the segments, reaching down into the map, so it never covers a segment. The rail stays visible at every anchor.
 - Preserve the selected anchor and theme through state restoration.
 
 The decision card leads with one plain-language conclusion, followed by source time and supporting detail. It should never require users to decode a heatmap before knowing whether leaving is sensible.
@@ -35,7 +35,7 @@ The decision card leads with one plain-language conclusion, followed by source t
 - The target marker, decision card, selected weather grid, and time control must always refer to the same location and effective time.
 - Primary layers are mutually exclusive:
   - `降雨雷達`: official numerical radar at “now,” official one-hour accumulated rainfall for the future product.
-  - `雲層 β`: neutral cloud rendering and experimental motion extrapolation.
+  - `雲圖`: neutral rendering of the latest satellite observation only. Cloud history downloads, historical timeline, and playback are disabled.
 - Wind is an independent optional overlay.
 - Typhoon is an independent optional overlay whose toggle appears only while CWA reports an active tropical cyclone. Track, forecast track, 70% probability area, and 7/10-level wind radii are drawn from official `W-C0034-005` values (quadrant radii when published, mean radius otherwise). The rotating spiral at the center is a stylized symbol: fixed screen size by intensity, never scaled to look like cloud extent, and its eye is decorative — do not fetch or imply real eye size. Do not add a legend caption explaining that the symbol is stylized. Enabling the toggle frames the target and the nearest cyclone.
 - Map-anchored geometry must render inside the base map's own frame (Google map objects, an osmdroid `Overlay`), not in a separate Compose layer that learns the camera a frame late. The typhoon layer follows this; the wind particles remain a Compose overlay.
@@ -90,7 +90,7 @@ The interface should feel precise and technical without behaving like a dense da
 
 - `O-A0059-001`: QPESUMS numerical radar reflectivity (`dBZ`).
 - `F-B0046-001`: official future-one-hour accumulated rainfall (`mm/1h`).
-- `O-C0042-008`: intended satellite source; the current cloud UI still uses demo frames until the live image pipeline is connected and verified.
+- `O-C0042-004` / `O-B0032-003`: latest native Taiwan 800×800 / East Asia 1200×1200 infrared satellite images. Use fileapi metadata and the matching cloud_native_* masks at original resolution. Taiwan uses the documented transverse Mercator projection; East Asia uses Lambert conformal. Metadata longitude/latitude ranges do not make the source image equirectangular. Satellite website animation and cloud history are disabled.
 - `O-A0001-001`: intended wind source; current wind observations are demo data until the live station adapter is connected and verified.
 - `W-C0034-005`: active tropical cyclone analysis track, forecast track, wind radii, and 70% probability radii. Typhoon geometry must never feed the rainfall decision.
 

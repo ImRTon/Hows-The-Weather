@@ -1,0 +1,209 @@
+{
+  "specification": "https://www.cwa.gov.tw/Data/data_catalog/3-7-2.pdf",
+  "method": "Graticule centerlines measured in original native JPGs, before crop/inpaint. Raster line width limits precision.",
+  "observed_at": "2026-11-10T20:40:00+08:00",
+  "taiwan": {
+    "size": 800,
+    "sha256": "ea40b5c106ae077453ed1772b2c9e45e145408d0a6ad08a33c7250aba50ae52b",
+    "controls": [
+      {
+        "latitude": 20,
+        "longitude": 118,
+        "x": 153.0,
+        "y": 718.5
+      },
+      {
+        "latitude": 20,
+        "longitude": 120,
+        "x": 317.0,
+        "y": 720.0
+      },
+      {
+        "latitude": 20,
+        "longitude": 122,
+        "x": 481.0,
+        "y": 720.0
+      },
+      {
+        "latitude": 20,
+        "longitude": 124,
+        "x": 645.0,
+        "y": 718.5
+      },
+      {
+        "latitude": 22,
+        "longitude": 118,
+        "x": 157.0,
+        "y": 544.5
+      },
+      {
+        "latitude": 22,
+        "longitude": 120,
+        "x": 318.0,
+        "y": 546.5
+      },
+      {
+        "latitude": 22,
+        "longitude": 122,
+        "x": 480.0,
+        "y": 546.5
+      },
+      {
+        "latitude": 22,
+        "longitude": 124,
+        "x": 641.0,
+        "y": 544.5
+      },
+      {
+        "latitude": 24,
+        "longitude": 118,
+        "x": 160.0,
+        "y": 370.5
+      },
+      {
+        "latitude": 24,
+        "longitude": 120,
+        "x": 319.0,
+        "y": 373.0
+      },
+      {
+        "latitude": 24,
+        "longitude": 122,
+        "x": 479.0,
+        "y": 373.0
+      },
+      {
+        "latitude": 24,
+        "longitude": 124,
+        "x": 638.0,
+        "y": 370.5
+      },
+      {
+        "latitude": 26,
+        "longitude": 118,
+        "x": 164.0,
+        "y": 197.5
+      },
+      {
+        "latitude": 26,
+        "longitude": 120,
+        "x": 321.0,
+        "y": 199.0
+      },
+      {
+        "latitude": 26,
+        "longitude": 122,
+        "x": 477.0,
+        "y": 199.0
+      },
+      {
+        "latitude": 26,
+        "longitude": 124,
+        "x": 634.0,
+        "y": 197.5
+      }
+    ]
+  },
+  "east_asia": {
+    "size": 1200,
+    "sha256": "9ed030849404a8d121f097cbab792fe09f991e05976e837aacce15ea1ced166f",
+    "controls": [
+      {
+        "latitude": 10,
+        "longitude": 110,
+        "x": 308.441,
+        "y": 943.409
+      },
+      {
+        "latitude": 10,
+        "longitude": 120,
+        "x": 572.725,
+        "y": 988.242
+      },
+      {
+        "latitude": 10,
+        "longitude": 130,
+        "x": 840.274,
+        "y": 999.994
+      },
+      {
+        "latitude": 10,
+        "longitude": 140,
+        "x": 1107.293,
+        "y": 978.282
+      },
+      {
+        "latitude": 20,
+        "longitude": 110,
+        "x": 368.413,
+        "y": 689.478
+      },
+      {
+        "latitude": 20,
+        "longitude": 120,
+        "x": 600.092,
+        "y": 729.148
+      },
+      {
+        "latitude": 20,
+        "longitude": 130,
+        "x": 835.623,
+        "y": 739.373
+      },
+      {
+        "latitude": 20,
+        "longitude": 140,
+        "x": 1070.003,
+        "y": 720.447
+      },
+      {
+        "latitude": 30,
+        "longitude": 110,
+        "x": 423.9,
+        "y": 453.009
+      },
+      {
+        "latitude": 30,
+        "longitude": 120,
+        "x": 626.219,
+        "y": 487.277
+      },
+      {
+        "latitude": 30,
+        "longitude": 130,
+        "x": 831.075,
+        "y": 496.141
+      },
+      {
+        "latitude": 30,
+        "longitude": 140,
+        "x": 1035.301,
+        "y": 479.534
+      },
+      {
+        "latitude": 40,
+        "longitude": 110,
+        "x": 477.322,
+        "y": 226.394
+      },
+      {
+        "latitude": 40,
+        "longitude": 120,
+        "x": 651.012,
+        "y": 255.78
+      },
+      {
+        "latitude": 40,
+        "longitude": 130,
+        "x": 826.717,
+        "y": 263.612
+      },
+      {
+        "latitude": 40,
+        "longitude": 140,
+        "x": 1001.865,
+        "y": 249.121
+      }
+    ]
+  }
+}

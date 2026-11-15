@@ -262,7 +262,7 @@ private fun LayerSegments(
                             RadarCoverage.LOCAL -> "區域雷達"
                         }
                         PrimaryLayer.ONE_HOUR_RAIN -> "1 小時"
-                        PrimaryLayer.CLOUD -> "雲層 β"
+                        PrimaryLayer.CLOUD -> "雲圖"
                     },
                     loading = layer == PrimaryLayer.RADAR_RAIN && radarLoading,
                     selected = layer == selected,

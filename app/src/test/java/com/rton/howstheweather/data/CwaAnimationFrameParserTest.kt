@@ -1,6 +1,7 @@
 package com.rton.howstheweather.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CwaAnimationFrameParserTest {
@@ -31,5 +32,32 @@ class CwaAnimationFrameParserTest {
             "https://www.cwa.gov.tw/Data/satellite/TWI_IR1_Gray_800/TWI_IR1_Gray_800-2026-07-13-22-20.jpg",
             records.single().url,
         )
+    }
+
+    @Test fun `latest selection scans a full sized inventory without collecting unrelated frames`() {
+        val script = buildString {
+            append("""{"img":"TWI_IR1_Gray_800/older.jpg","text":"2026/11/10 19:20"},""")
+            repeat(12_000) { index ->
+                append("""{"img":"FDK_VIS_Gray_2750/FDK_VIS_Gray_2750-$index.jpg","text":"2026/11/10 19:50"},""")
+            }
+            append("""{"img":"TWI_IR1_Gray_800/TWI_IR1_Gray_800-2026-11-10-19-40.jpg","text":"2026/11/10 19:40"},""")
+            append("""{"img":"TWI_IR1_Gray_800/TWI_IR1_Gray_800-2026-11-10-19-10.jpg","text":"2026/11/10 19:10"}""")
+        }
+        val record = CwaAnimationFrameParser().parseLatest(script, "TWI_IR1_Gray_800-", "https://www.cwa.gov.tw/Data/satellite")
+
+        assertEquals("2026-11-10T11:40:00Z", record?.observedAt.toString())
+        assertTrue(record!!.url.endsWith("19-40.jpg"))
+    }
+
+    @Test fun `latest inventory scan can be cancelled before completing`() {
+        val script = ("""{"img":"FDK/FDK-001.jpg","text":"2026/11/10 19:40"},""").repeat(1000)
+        var checked = 0
+        val failure = runCatching {
+            CwaAnimationFrameParser().parseLatest(script, "TWI_IR1_Gray_800-", "https://www.cwa.gov.tw") {
+                if (++checked == 10) throw java.util.concurrent.CancellationException("cancel scan")
+            }
+        }.exceptionOrNull()
+        assertTrue(failure is java.util.concurrent.CancellationException)
+        assertEquals(10, checked)
     }
 }

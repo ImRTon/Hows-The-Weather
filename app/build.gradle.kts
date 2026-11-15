@@ -17,10 +17,10 @@ abstract class GenerateEastAsiaProjectionLookup : DefaultTask() {
 
     @TaskAction
     fun generate() {
-        val imageWidth = 800
-        val imageHeight = 800
-        val gridWidth = 320
-        val gridHeight = 320
+        val imageWidth = 1200
+        val imageHeight = 1200
+        val gridWidth = imageWidth
+        val gridHeight = imageHeight
         val south = 0.0
         val west = 102.0
         val north = 50.0

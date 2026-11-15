@@ -468,8 +468,8 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                         listOfNotNull(previous?.radarRegional),
                 ).dropLast(1)
             }.orEmpty(),
-            cloudFrames = mergeObservedFrames(loaded.cloudFrames, previous?.cloudFrames.orEmpty()),
-            cloudRegionalFrames = mergeObservedFrames(
+            cloudFrames = latestCloudFrames(loaded.cloudFrames, previous?.cloudFrames.orEmpty()),
+            cloudRegionalFrames = latestCloudFrames(
                 loaded.cloudRegionalFrames,
                 previous?.cloudRegionalFrames.orEmpty(),
             ),
@@ -491,7 +491,8 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 center = it.mapCenter,
                 loaded = resolved,
             )
-            val selectedMinute = it.selectedMinute.coerceIn(-OBSERVATION_HISTORY_MINUTES, TIMELINE_END_MINUTE)
+            val selectedMinute = if (it.layers.primary == PrimaryLayer.CLOUD) 0 else
+                it.selectedMinute.coerceIn(-OBSERVATION_HISTORY_MINUTES, TIMELINE_END_MINUTE)
             it.copy(
                 target = applicableAreaForecast?.let { forecast ->
                     it.target.copy(displayName = forecast.displayName)
@@ -726,10 +727,8 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private fun windTimestamp(value: WeatherSnapshot): Instant? =
         value.windGrid?.validAt ?: value.winds.maxOfOrNull { it.observedAt }
 
-    private fun mergeObservedFrames(incoming: List<WeatherGrid>, existing: List<WeatherGrid>): List<WeatherGrid> {
-        val current = incoming.maxByOrNull(WeatherGrid::validAt) ?: return existing
-        return observedTimeline.merge(current, incoming + existing)
-    }
+    private fun latestCloudFrames(incoming: List<WeatherGrid>, existing: List<WeatherGrid>): List<WeatherGrid> =
+        listOfNotNull((incoming + existing).filter(WeatherGrid::isObservedFrame).maxByOrNull(WeatherGrid::validAt))
 
     private fun shouldPreserveWind(previous: WeatherSnapshot, incoming: WeatherSnapshot): Boolean {
         val previousRank = previous.windProvenance.priority
@@ -767,12 +766,13 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     }
 
     fun setMinute(minute: Int) {
-        val value = minute.coerceIn(-OBSERVATION_HISTORY_MINUTES, TIMELINE_END_MINUTE)
         val primary = _uiState.value.layers.primary
+        val value = if (primary == PrimaryLayer.CLOUD) 0 else
+            minute.coerceIn(-OBSERVATION_HISTORY_MINUTES, TIMELINE_END_MINUTE)
         if (value < 0) {
             when (primary) {
                 PrimaryLayer.RADAR_RAIN -> requestHistory(WeatherHistoryKind.RADAR, targetMinute = value)
-                PrimaryLayer.CLOUD -> requestHistory(WeatherHistoryKind.CLOUD, targetMinute = value)
+                PrimaryLayer.CLOUD -> Unit
                 PrimaryLayer.ONE_HOUR_RAIN -> Unit
             }
         }
@@ -792,11 +792,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 ?: loaded.rainForecast.lastOrNull()
         }
         if (layer == PrimaryLayer.CLOUD) {
-            val frames = cloudFrames(loaded, coverage).filter(WeatherGrid::isObservedFrame)
-            val reference = frames.maxByOrNull { it.validAt } ?: return null
-            return frames.minByOrNull {
-                kotlin.math.abs(java.time.Duration.between(reference.validAt, it.validAt).toMinutes().toInt() - minute)
-            }
+            return cloudFrames(loaded, coverage).filter(WeatherGrid::isObservedFrame).maxByOrNull { it.validAt }
         }
         val currentRadar = if (radarCoverage == RadarCoverage.LOCAL) loaded.radarRegional ?: loaded.radar else loaded.radar
         val frames = if (radarCoverage == RadarCoverage.LOCAL && loaded.radarRegionalFrames.isNotEmpty()) {
@@ -832,12 +828,17 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             playbackJob = null
             _uiState.update { it.copy(isPlaybackPending = false) }
         }
-        if (layer == PrimaryLayer.ONE_HOUR_RAIN) playbackJob?.cancel()
-        val minute = _uiState.value.selectedMinute
+        if (layer != PrimaryLayer.RADAR_RAIN) playbackJob?.cancel()
+        if (layer == PrimaryLayer.CLOUD) {
+            historyJob?.cancel()
+            requestedHistoryKind = null
+            historyLoadingRequest = null
+        }
+        val minute = if (layer == PrimaryLayer.CLOUD) 0 else _uiState.value.selectedMinute
         if (minute < 0) {
             when (layer) {
                 PrimaryLayer.RADAR_RAIN -> requestHistory(WeatherHistoryKind.RADAR, targetMinute = minute)
-                PrimaryLayer.CLOUD -> requestHistory(WeatherHistoryKind.CLOUD, targetMinute = minute)
+                PrimaryLayer.CLOUD -> Unit
                 PrimaryLayer.ONE_HOUR_RAIN -> Unit
             }
         }
@@ -847,7 +848,8 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 layers = it.layers.copy(primary = layer),
                 selectedMinute = minute,
                 activeGrid = activeGrid,
-                isPlaying = if (layer == PrimaryLayer.ONE_HOUR_RAIN) false else it.isPlaying,
+                isPlaying = if (layer != PrimaryLayer.RADAR_RAIN) false else it.isPlaying,
+                isHistoryLoading = if (layer == PrimaryLayer.CLOUD) false else it.isHistoryLoading,
                 message = it.message,
             )
         }
@@ -1018,6 +1020,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     }
 
     private fun requestHistory(kind: WeatherHistoryKind, targetMinute: Int? = null) {
+        if (kind == WeatherHistoryKind.CLOUD) return
         historyLoadFailure = null
         historyLoadFailureKind = null
         val requested = HistoryLoadingRequest(kind, targetMinute)
@@ -1118,7 +1121,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         if (state.selectedMinute >= 0 && !state.isPlaying) return null
         return when (state.layers.primary) {
             PrimaryLayer.RADAR_RAIN -> WeatherHistoryKind.RADAR
-            PrimaryLayer.CLOUD -> WeatherHistoryKind.CLOUD
+            PrimaryLayer.CLOUD -> null
             PrimaryLayer.ONE_HOUR_RAIN -> null
         }
     }
@@ -1238,6 +1241,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
 
     fun togglePlayback() {
         val current = _uiState.value
+        if (current.layers.primary == PrimaryLayer.CLOUD) return
         if (current.isPlaying || current.isPlaybackPending) {
             playbackJob?.cancel()
             playbackJob = null
@@ -1254,7 +1258,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         playbackJob = viewModelScope.launch {
             val historyKind = when (_uiState.value.layers.primary) {
                 PrimaryLayer.RADAR_RAIN -> WeatherHistoryKind.RADAR
-                PrimaryLayer.CLOUD -> WeatherHistoryKind.CLOUD
+                PrimaryLayer.CLOUD -> null
                 PrimaryLayer.ONE_HOUR_RAIN -> null
             }
             if (historyKind == null) {
@@ -1389,7 +1393,7 @@ internal fun nextObservationFrameMinute(minute: Int): Int =
 internal fun hasCompleteHistoryForPlayback(kind: WeatherHistoryKind, frameCount: Int): Boolean =
     when (kind) {
         WeatherHistoryKind.RADAR -> frameCount >= OBSERVATION_HISTORY_FRAME_COUNT - 1
-        WeatherHistoryKind.CLOUD -> frameCount >= OBSERVATION_HISTORY_FRAME_COUNT
+        WeatherHistoryKind.CLOUD -> false
     }
 
 internal fun isObservationMinuteAvailable(

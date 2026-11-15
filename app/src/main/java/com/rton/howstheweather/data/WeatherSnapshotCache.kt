@@ -245,9 +245,9 @@ class WeatherSnapshotCache(
     private companion object {
         const val FILE_NAME = "last-known-good.bin.gz"
         const val MAGIC = 0x48545731 // HTW1
-        // Version 10 invalidates cloud grids parsed before fixed-basemap removal.
-        // Older caches would otherwise briefly restore cartographic edges.
-        const val VERSION = 10
+        // Taiwan now uses the documented transverse Mercator projection.
+        // Never restore clouds made by the earlier linear latitude/longitude path.
+        const val VERSION = 13
         // O-A0001-001 currently contains roughly 900 stations. Keep the bound
         // finite for corrupt-cache protection while allowing a complete
         // official observation set to survive process restarts.

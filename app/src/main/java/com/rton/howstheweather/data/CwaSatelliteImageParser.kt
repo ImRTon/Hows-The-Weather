@@ -7,6 +7,7 @@ import com.rton.howstheweather.diagnostics.StartupDiagnostics
 import com.rton.howstheweather.domain.GeoBounds
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.LambertConformalProjection
+import com.rton.howstheweather.domain.TransverseMercatorProjection
 import com.rton.howstheweather.domain.WeatherGrid
 import com.rton.howstheweather.domain.WeatherUnit
 import org.json.JSONObject
@@ -14,8 +15,6 @@ import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.time.OffsetDateTime
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.cos
-import kotlin.math.roundToInt
 
 data class CwaSatelliteImageMetadata(
     val bounds: GeoBounds,
@@ -29,6 +28,7 @@ class CwaSatelliteImageParser private constructor(
     private val cloudImageCleaners: Map<String, CloudImageCleaner>,
 ) {
     constructor() : this(null, emptyMap())
+    internal constructor(cleaners: Map<String, CloudImageCleaner>) : this(null, cleaners)
 
     fun parseMetadata(json: String): CwaSatelliteImageMetadata {
         val dataset = JSONObject(json).getJSONObject("cwaopendata").getJSONObject("dataset")
@@ -50,36 +50,23 @@ class CwaSatelliteImageParser private constructor(
         height: Int,
         argbPixels: IntArray,
         sourceId: String,
-        maxGridDimension: Int = MAX_GRID_DIMENSION,
         checkCancelled: () -> Unit = {},
     ): WeatherGrid {
         require(width > 1 && height > 1)
         require(argbPixels.size == width * height)
-        require(maxGridDimension >= 2)
-        if (sourceId.startsWith(TAIWAN_DATASET_ID)) {
-            return toDirectGrid(
-                metadata,
-                width,
-                height,
-                argbPixels,
-                sourceId,
-                maxGridDimension,
-                checkCancelled,
-            )
+        require(sourceId.startsWith(TAIWAN_DATASET_ID) || sourceId.startsWith(EAST_ASIA_DATASET_ID)) {
+            "不支援的衛星投影：$sourceId"
         }
-        require(sourceId.startsWith(EAST_ASIA_DATASET_ID)) { "不支援的衛星投影：$sourceId" }
-        val scale = maxOf(width, height).toDouble() / maxGridDimension
-        val gridWidth = if (scale <= 1.0) width else (width / scale).toInt().coerceAtLeast(2)
-        val gridHeight = if (scale <= 1.0) height else (height / scale).toInt().coerceAtLeast(2)
+        // Reproject at the source dimensions; never impose a smaller cloud grid.
+        val gridWidth = width
+        val gridHeight = height
         val values = FloatArray(gridWidth * gridHeight) { Float.NaN }
-        val projectedPixels = projectionIndices(metadata, width, height, gridWidth, gridHeight)
-        val cleanedCloudPixels = cleanerFor(sourceId)?.cleanSampledArgb(
-            sourceWidth = width,
-            sourceHeight = height,
+        val projectedPixels = projectionIndices(metadata, width, height, gridWidth, gridHeight, sourceId)
+        val cleanedCloudPixels = cleanerFor(sourceId)?.cleanCroppedArgb(
+            width = width,
+            height = height,
             argbPixels = argbPixels,
-            outputWidth = gridWidth,
-            outputHeight = gridHeight,
-            sourceIndices = projectedPixels,
+            checkCancelled = checkCancelled,
         )
         val luminancePixels = if (cleanedCloudPixels == null) {
             IntArray(argbPixels.size) { luminance(argbPixels[it]) }
@@ -93,7 +80,11 @@ class CwaSatelliteImageParser private constructor(
                 val outputIndex = y * gridWidth + x
                 val sourceIndex = projectedPixels[outputIndex]
                 if (sourceIndex < 0) continue
-                values[outputIndex] = cleanedCloudPixels?.get(outputIndex) ?: run {
+                values[outputIndex] = if (cleanedCloudPixels != null) {
+                    // Projection indices stay in the original image coordinates.
+                    // A removed title/border is missing, never stretched into place.
+                    cleanedCloudPixels.valueAtSource(sourceIndex) ?: Float.NaN
+                } else {
                     val sourceX = sourceIndex % width
                     val sourceY = sourceIndex / width
                     val luminance = lowerQuartileLuminance(
@@ -133,8 +124,11 @@ class CwaSatelliteImageParser private constructor(
         imageHeight: Int,
         gridWidth: Int,
         gridHeight: Int,
+        sourceId: String,
     ): IntArray {
+        val taiwan = sourceId.startsWith(TAIWAN_DATASET_ID)
         val key = ProjectionKey(
+            projectionDatasetId = if (taiwan) TAIWAN_DATASET_ID else EAST_ASIA_DATASET_ID,
             imageWidth = imageWidth,
             imageHeight = imageHeight,
             gridWidth = gridWidth,
@@ -153,85 +147,28 @@ class CwaSatelliteImageParser private constructor(
                     y.toDouble() / (gridHeight - 1) * (metadata.bounds.north - metadata.bounds.south)
                 val longitude = metadata.bounds.west +
                     x.toDouble() / (gridWidth - 1) * (metadata.bounds.east - metadata.bounds.west)
-                projectToEastAsia(latitude, longitude, imageWidth, imageHeight)?.let { (pixelX, pixelY) ->
+                val pixel = if (taiwan) projectToTaiwan(latitude, longitude, imageWidth, imageHeight)
+                    else projectToEastAsia(latitude, longitude, imageWidth, imageHeight)
+                pixel?.let { (pixelX, pixelY) ->
                     pixelY * imageWidth + pixelX
                 } ?: -1
             }
         }
     }
 
-    /** Taiwan products are already rendered on a regular longitude/latitude rectangle. */
-    private fun toDirectGrid(
-        metadata: CwaSatelliteImageMetadata,
-        width: Int,
-        height: Int,
-        argbPixels: IntArray,
-        sourceId: String,
-        maxGridDimension: Int,
-        checkCancelled: () -> Unit,
-    ): WeatherGrid {
-        val scale = maxOf(width, height).toDouble() / maxGridDimension
-        val gridWidth = if (scale <= 1.0) width else (width / scale).roundToInt().coerceAtLeast(2)
-        val gridHeight = if (scale <= 1.0) height else (height / scale).roundToInt().coerceAtLeast(2)
-        val values = FloatArray(gridWidth * gridHeight)
-        val directPixels = IntArray(gridWidth * gridHeight) { index ->
-            val x = index % gridWidth
-            val y = index / gridWidth
-            val sourceX = (x.toDouble() / (gridWidth - 1) * (width - 1)).roundToInt()
-            val sourceY = (y.toDouble() / (gridHeight - 1) * (height - 1)).roundToInt()
-            sourceY * width + sourceX
-        }
-        val cleanedCloudPixels = cleanerFor(sourceId)?.cleanSampledArgb(
-            sourceWidth = width,
-            sourceHeight = height,
-            argbPixels = argbPixels,
-            outputWidth = gridWidth,
-            outputHeight = gridHeight,
-            sourceIndices = directPixels,
-        )
-        val luminancePixels = if (cleanedCloudPixels == null) {
-            IntArray(argbPixels.size) { luminance(argbPixels[it]) }
-        } else {
-            null
-        }
-        val neighborhoodSamples = if (cleanedCloudPixels == null) IntArray(25) else null
-        for (y in 0 until gridHeight) {
-            checkCancelled()
-            for (x in 0 until gridWidth) {
-                val outputIndex = y * gridWidth + x
-                val sourceIndex = directPixels[outputIndex]
-                values[outputIndex] = cleanedCloudPixels?.get(outputIndex) ?: run {
-                    val sourceX = sourceIndex % width
-                    val sourceY = sourceIndex / width
-                    // Fallback for parser-only tests and installations without bundled templates.
-                    val luminance = lowerQuartileLuminance(
-                        requireNotNull(luminancePixels),
-                        width,
-                        height,
-                        sourceX,
-                        sourceY,
-                        requireNotNull(neighborhoodSamples),
-                    )
-                    luminance.takeIf { it >= MIN_VISIBLE_LUMINANCE } ?: 0f
-                }
-            }
-        }
-        val midLatitude = (metadata.bounds.south + metadata.bounds.north) / 2.0
-        val resolutionKm = minOf(
-            (metadata.bounds.east - metadata.bounds.west) / (gridWidth - 1) * 111.0 *
-                cos(Math.toRadians(midLatitude)),
-            (metadata.bounds.north - metadata.bounds.south) / (gridHeight - 1) * 111.0,
-        )
-        return WeatherGrid(
-            width = gridWidth,
-            height = gridHeight,
-            values = values,
-            unit = WeatherUnit.LUMINANCE,
-            bounds = metadata.bounds,
-            resolutionKm = resolutionKm,
-            validAt = metadata.observedAt,
-            sourceId = sourceId,
-        )
+    /** Taiwan is transverse Mercator, not an equirectangular latitude/longitude image. */
+    internal fun projectToTaiwan(
+        latitude: Double,
+        longitude: Double,
+        imageWidth: Int,
+        imageHeight: Int,
+    ): Pair<Int, Int>? {
+        if (latitude !in -89.999..89.999 || longitude !in -180.0..360.0) return null
+        val projected = TAIWAN_PROJECTION.forward(GeoPoint(latitude, longitude))
+        val x = (projected.x - TAIWAN_LOWER_LEFT.x) / (TAIWAN_UPPER_RIGHT.x - TAIWAN_LOWER_LEFT.x)
+        val y = (projected.y - TAIWAN_LOWER_LEFT.y) / (TAIWAN_UPPER_RIGHT.y - TAIWAN_LOWER_LEFT.y)
+        if (x !in 0.0..1.0 || y !in 0.0..1.0) return null
+        return (x * (imageWidth - 1)).toInt() to ((1 - y) * (imageHeight - 1)).toInt()
     }
 
     /** Converts WGS84 coordinates into CWA's fixed East Asia Lambert image. */
@@ -277,9 +214,11 @@ class CwaSatelliteImageParser private constructor(
         return selectKth(samples, LOWER_QUARTILE_INDEX) / 255f
     }
 
-    private fun cleanerFor(sourceId: String): CloudImageCleaner? = cloudImageCleaners.entries
-        .firstOrNull { sourceId.startsWith(it.key) }
-        ?.value
+    private fun cleanerFor(sourceId: String): CloudImageCleaner? {
+        val cleaner = cloudImageCleaners.entries.firstOrNull { sourceId.startsWith(it.key) }?.value
+        check(cloudImageCleaners.isEmpty() || cleaner != null) { "衛星影像版型沒有對應遮罩：$sourceId" }
+        return cleaner
+    }
 
     internal fun selectKth(values: IntArray, k: Int): Int {
         require(k in values.indices)
@@ -329,11 +268,17 @@ class CwaSatelliteImageParser private constructor(
                 CwaSatelliteImageParser(
                     runCatching { readBundledEastAsiaProjection(resources) }.getOrNull(),
                     mapOf(
-                        TAIWAN_DATASET_ID to CloudImageCleaner(
-                            readBundledCloudBackground(resources, R.raw.cloud_background_taiwan),
+                        CwaSatelliteProduct.TAIWAN.sourceId to CloudImageCleaner(
+                            readBundledCloudBackground(
+                                resources, R.raw.cloud_native_background_taiwan,
+                                R.raw.cloud_native_annotations_taiwan, R.raw.cloud_native_exclusions_taiwan,
+                            ),
                         ),
-                        EAST_ASIA_DATASET_ID to CloudImageCleaner(
-                            readBundledCloudBackground(resources, R.raw.cloud_background_east_asia),
+                        CwaSatelliteProduct.EAST_ASIA.sourceId to CloudImageCleaner(
+                            readBundledCloudBackground(
+                                resources, R.raw.cloud_native_background_east_asia,
+                                R.raw.cloud_native_annotations_east_asia, R.raw.cloud_native_exclusions_east_asia,
+                            ),
                         ),
                     ),
                 )
@@ -342,6 +287,8 @@ class CwaSatelliteImageParser private constructor(
         private fun readBundledCloudBackground(
             resources: Resources,
             resourceId: Int,
+            annotationResourceId: Int,
+            exclusionResourceId: Int,
         ): CloudBackgroundTemplate {
             val bitmap = resources.openRawResource(resourceId).use { input ->
                 BitmapFactory.decodeStream(input) ?: error("衛星固定背景解碼失敗")
@@ -359,7 +306,28 @@ class CwaSatelliteImageParser private constructor(
                         val blue = color and 0xff
                         (red * 0.2126f + green * 0.7152f + blue * 0.0722f) / 255f
                     },
+                    annotationMask = readBundledCloudMask(resources, annotationResourceId, bitmap.width, bitmap.height),
+                    excludedMask = readBundledCloudMask(resources, exclusionResourceId, bitmap.width, bitmap.height),
                 )
+            } finally {
+                bitmap.recycle()
+            }
+        }
+
+        private fun readBundledCloudMask(
+            resources: Resources,
+            resourceId: Int,
+            width: Int,
+            height: Int,
+        ): BooleanArray {
+            val bitmap = resources.openRawResource(resourceId).use {
+                BitmapFactory.decodeStream(it) ?: error("衛星固定遮罩解碼失敗")
+            }
+            return try {
+                check(bitmap.width == width && bitmap.height == height) { "衛星固定遮罩尺寸不符" }
+                val pixels = IntArray(width * height)
+                bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+                BooleanArray(pixels.size) { (pixels[it] and 0xff) >= 128 }
             } finally {
                 bitmap.recycle()
             }
@@ -376,6 +344,7 @@ class CwaSatelliteImageParser private constructor(
                     "東亞投影索引版本不支援"
                 }
                 val key = ProjectionKey(
+                    projectionDatasetId = EAST_ASIA_DATASET_ID,
                     imageWidth = input.readInt(),
                     imageHeight = input.readInt(),
                     gridWidth = input.readInt(),
@@ -396,9 +365,17 @@ class CwaSatelliteImageParser private constructor(
         private const val PRECOMPUTED_PROJECTION_VERSION = 1
         private const val MIN_VISIBLE_LUMINANCE = 0.06f
         private const val LOWER_QUARTILE_INDEX = 6
-        private const val MAX_GRID_DIMENSION = 800
         private const val TAIWAN_DATASET_ID = "O-C0042-004"
         private const val EAST_ASIA_DATASET_ID = "O-B0032-003"
+        // CWA product specification 3-7-2.pdf, section 2.2.2:
+        // Taiwan TM origin (121,23.7), LL (116.1417,19.0295), UR (126.2109,28.2065).
+        private val TAIWAN_PROJECTION = TransverseMercatorProjection(
+            radius = 6_371_000.0,
+            latitudeOfOriginDegrees = 23.7,
+            centralLongitudeDegrees = 121.0,
+        )
+        private val TAIWAN_LOWER_LEFT = TAIWAN_PROJECTION.forward(GeoPoint(19.0295, 116.1417))
+        private val TAIWAN_UPPER_RIGHT = TAIWAN_PROJECTION.forward(GeoPoint(28.2065, 126.2109))
         private val EAST_ASIA_PROJECTION = LambertConformalProjection(
             radius = 6_371_000.0,
             latitudeOfOriginDegrees = 0.0,
@@ -419,6 +396,7 @@ private data class PrecomputedProjection(
 )
 
 private data class ProjectionKey(
+    val projectionDatasetId: String,
     val imageWidth: Int,
     val imageHeight: Int,
     val gridWidth: Int,

@@ -1739,7 +1739,8 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                     .onSizeChanged { topControlsHeight.intValue = it.height }
                     .padding(top = MAP_ACTION_MARGIN, end = MAP_ACTION_MARGIN),
             )
-            val bottomTouchOverhangPx = with(density) { TIMELINE_TOUCH_OVERHANG.roundToPx() }
+            val bottomTouchOverhangPx = if (state.layers.primary == PrimaryLayer.CLOUD) 0 else
+                with(density) { TIMELINE_TOUCH_OVERHANG.roundToPx() }
             val measureBottomControls = Modifier
                 .align(Alignment.BottomCenter)
                 .onSizeChanged {
@@ -1747,6 +1748,15 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 }
             if (state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN) {
                 OneHourRainControls(state, measureBottomControls)
+            } else if (state.layers.primary == PrimaryLayer.CLOUD) {
+                if (state.legendExpanded) {
+                    DockedMapBottomBar(modifier = measureBottomControls, topTouchOverhang = 0.dp) {
+                        WeatherLegend(
+                            unit = WeatherUnit.LUMINANCE,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                        )
+                    }
+                }
             } else {
                 TimelineControls(
                     state = state,
@@ -1767,7 +1777,10 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         }
         if (state.destination == AppDestination.NOW) MapEndActions(
             topControlsHeightPx = { topControlsHeight.intValue },
-            bottomControlsHeightPx = { bottomControlsHeight.intValue },
+            bottomControlsHeightPx = {
+                if (state.layers.primary == PrimaryLayer.CLOUD && !state.legendExpanded) 0
+                else bottomControlsHeight.intValue
+            },
             locating = locating,
             onLocate = locateOrRequestPermission,
             secondaryAction = if (state.tropicalCyclones.isNotEmpty()) {
