@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">How’s the Weather</string>
+    <string name="widget_description">Time, CWA weather &amp; rain summary, Google Search bar, and media volume slider</string>
+    <string name="widget_its_text">it’s</string>
+    <string name="widget_default_weekday">Sunday.</string>
+    <string name="widget_default_date">November 15</string>
+    <string name="widget_open_weather_desc">Open How’s the Weather and refresh forecast</string>
+    <string name="widget_google_search_desc">Open Google Search</string>
+    <string name="widget_media_volume_desc">Adjust media volume</string>
 </resources>
