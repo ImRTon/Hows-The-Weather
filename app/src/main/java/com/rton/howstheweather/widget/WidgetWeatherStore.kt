@@ -151,12 +151,14 @@ object WidgetWeatherStore {
         ) {
             return
         }
+        val previous = read(context)
         val summary = WidgetWeatherFormatter.fromAppState(
             targetDisplayName = state.target.displayName,
             currentWeather = state.currentWeather,
             areaForecast = state.areaForecast,
             weeklyForecast = state.weeklyForecast,
             decision = state.decision,
+            previous = previous,
         )
         write(context, summary, state.target.coordinate)
         WeatherDesktopWidgetProvider.updateAllWidgets(context)
@@ -169,6 +171,7 @@ object WidgetWeatherStore {
             if (!force &&
                 cached != null &&
                 cached.conditionEnglish != null &&
+                cached.rainProbabilityPercent != null &&
                 nowMillis - cached.updatedAtEpochMillis in 0..FRESHNESS_WINDOW_MILLIS
             ) {
                 return@withContext cached
@@ -256,6 +259,7 @@ object WidgetWeatherStore {
                         areaForecast = areaForecast,
                         weeklyForecast = weeklyForecast,
                         decision = decision,
+                        previous = cached,
                     )
                     write(context, summary, target)
                     summary

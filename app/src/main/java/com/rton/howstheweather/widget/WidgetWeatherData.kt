@@ -79,6 +79,7 @@ object WidgetWeatherFormatter {
         areaForecast: AreaForecast?,
         weeklyForecast: AreaForecast?,
         decision: ForecastDecision,
+        previous: WidgetWeatherSummary? = null,
         now: Instant = Instant.now(),
     ): WidgetWeatherSummary {
         val activePeriod = areaForecast?.periods?.firstOrNull()
@@ -93,7 +94,7 @@ object WidgetWeatherFormatter {
             weatherCode = conditionCode,
             description = rawCondition,
             rainState = decision.state,
-        )
+        ) ?: previous?.conditionEnglish
 
         val candidateTemps = buildList {
             currentWeather?.temperatureCelsius?.roundToInt()?.let(::add)
@@ -109,29 +110,42 @@ object WidgetWeatherFormatter {
         val highTemp = weeklyForecast?.periods?.take(2)?.mapNotNull { it.maximumTemperatureCelsius }?.maxOrNull()
             ?: areaForecast?.periods?.take(4)?.mapNotNull { it.maximumTemperatureCelsius }?.maxOrNull()
             ?: candidateTemps.maxOrNull()
+            ?: previous?.highTempCelsius
         val lowTemp = weeklyForecast?.periods?.take(2)?.mapNotNull { it.minimumTemperatureCelsius }?.minOrNull()
             ?: areaForecast?.periods?.take(4)?.mapNotNull { it.minimumTemperatureCelsius }?.minOrNull()
             ?: candidateTemps.minOrNull()
+            ?: previous?.lowTempCelsius
 
         val pop = activePeriod?.precipitationProbabilityPercent
             ?: weeklyPeriod?.precipitationProbabilityPercent
+            ?: areaForecast?.periods?.firstNotNullOfOrNull { it.precipitationProbabilityPercent }
+            ?: weeklyForecast?.periods?.firstNotNullOfOrNull { it.precipitationProbabilityPercent }
+            ?: previous?.rainProbabilityPercent
 
         val hourlyMm = decision.series.firstOrNull()?.millimetersPerHour
             ?.takeIf { it.isFinite() && it >= 0f }
+            ?: previous?.hourlyRainMillimeters
+
+        val resolvedRainState = if (decision.state != RainState.UNAVAILABLE) {
+            decision.state
+        } else {
+            previous?.rainState ?: RainState.UNAVAILABLE
+        }
 
         val rawLocation = areaForecast?.countyName?.takeIf { it.isNotBlank() }
             ?: weeklyForecast?.countyName?.takeIf { it.isNotBlank() }
             ?: targetDisplayName
 
         return WidgetWeatherSummary(
-            locationName = translateLocationName(rawLocation) ?: "Taipei",
+            locationName = translateLocationName(rawLocation) ?: previous?.locationName ?: "Taipei",
             conditionEnglish = conditionEnglish,
             currentTempCelsius = currentWeather?.temperatureCelsius
-                ?: activePeriod?.maximumTemperatureCelsius?.toFloat(),
+                ?: activePeriod?.maximumTemperatureCelsius?.toFloat()
+                ?: previous?.currentTempCelsius,
             highTempCelsius = highTemp,
             lowTempCelsius = lowTemp,
             rainProbabilityPercent = pop,
-            rainState = decision.state,
+            rainState = resolvedRainState,
             hourlyRainMillimeters = hourlyMm,
             updatedAtEpochMillis = now.toEpochMilli(),
         )
@@ -261,9 +275,21 @@ object WidgetWeatherFormatter {
                 appendPlain(" and a low of ")
                 appendAccent("$low°C")
             }
+            high != null && rainTail != null -> {
+                appendPlain(" with a high of ")
+                appendAccent("$high°C")
+                appendPlain(" and ")
+                appendAccent(rainTail.first)
+                if (rainTail.second.isNotEmpty()) appendPlain(rainTail.second)
+            }
             high != null -> {
                 appendPlain(" with a high of ")
                 appendAccent("$high°C")
+            }
+            rainTail != null -> {
+                appendPlain(" with ")
+                appendAccent(rainTail.first)
+                if (rainTail.second.isNotEmpty()) appendPlain(rainTail.second)
             }
         }
 
@@ -274,7 +300,7 @@ object WidgetWeatherFormatter {
     }
 
     /**
-     * Returns (accentedText, plainTrailingText) for a compact, non-truncating rain tail.
+     * Returns (accentedText, plainTrailingText) so rain probability is always included.
      */
     private fun compactRainTail(summary: WidgetWeatherSummary): Pair<String, String>? {
         val mmText = summary.hourlyRainMillimeters
@@ -295,15 +321,16 @@ object WidgetWeatherFormatter {
                     RainState.DRY,
                     RainState.UNAVAILABLE -> "rain"
                 }
-                val accent = if (mmText != null) "$label ($mmText)" else label
+                val detail = buildList {
+                    if (pop != null) add("$pop%")
+                    if (mmText != null) add(mmText)
+                }.joinToString(" · ")
+                val accent = if (detail.isNotEmpty()) "$label ($detail)" else label
                 accent to " in 1h"
             }
             RainState.DRY -> {
-                if (pop != null && pop > 0) {
-                    "$pop%" to " rain chance"
-                } else {
-                    "no rain" to " in 1h"
-                }
+                val resolvedPop = pop ?: 0
+                "$resolvedPop%" to " rain chance"
             }
             RainState.UNAVAILABLE -> {
                 if (pop != null) "$pop%" to " rain chance" else null
@@ -336,7 +363,6 @@ object WidgetWeatherFormatter {
         }
 
         for ((start, end, _) in accentRanges) {
-            // Keep small summary text crisp and punchy in rich crimson (#FF1E56)
             builder.setSpan(
                 ForegroundColorSpan(ACCENT_COLOR_HEX),
                 start,
