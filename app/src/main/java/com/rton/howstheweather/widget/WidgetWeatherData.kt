@@ -31,12 +31,74 @@ object WidgetWeatherFormatter {
     const val ACCENT_COLOR_HEX: Int = 0xFFFF1E56.toInt()
     const val GRADIENT_END_HEX: Int = 0xFFFF3868.toInt()
 
+    const val DEFAULT_WEEKDAY_TEXT_SIZE_SP: Float = 50f
+    const val MIN_WEEKDAY_TEXT_SIZE_SP: Float = 22f
+    const val DEFAULT_AVAILABLE_WEEKDAY_WIDTH_DP: Float = 268f
+    private const val MIN_AVAILABLE_WEEKDAY_WIDTH_DP: Float = 96f
+    private const val WIDGET_HORIZONTAL_PADDING_DP: Float = 52f
+
     private val weekdayFormatter = DateTimeFormatter.ofPattern("EEEE", Locale.ENGLISH)
     private val dateFormatter = DateTimeFormatter.ofPattern("MMMM d", Locale.ENGLISH)
     private val time12Formatter = DateTimeFormatter.ofPattern("h:mm", Locale.ENGLISH)
     private val time24Formatter = DateTimeFormatter.ofPattern("HH:mm", Locale.ENGLISH)
 
     fun formatWeekday(now: ZonedDateTime): String = "${weekdayFormatter.format(now)}."
+
+    fun resolveAvailableWeekdayWidthDp(minWidthDp: Int): Float {
+        if (minWidthDp <= 0) return DEFAULT_AVAILABLE_WEEKDAY_WIDTH_DP
+        return (minWidthDp - WIDGET_HORIZONTAL_PADDING_DP)
+            .coerceAtLeast(MIN_AVAILABLE_WEEKDAY_WIDTH_DP)
+    }
+
+    /**
+     * Estimates the horizontal advance width (in `em` units) of a weekday headline
+     * such as `"Wednesday."` in bold sans-serif.
+     */
+    internal fun estimateWeekdayWidthEm(weekdayText: String): Float {
+        if (weekdayText.isEmpty()) return 0f
+        var rawEm = 0f
+        for (ch in weekdayText) {
+            rawEm += when (ch) {
+                'W' -> 0.91f
+                'M' -> 0.87f
+                'T', 'S' -> 0.62f
+                'F' -> 0.56f
+                'h', 'u', 'n', 'd', 'o' -> 0.57f
+                'a', 'e' -> 0.545f
+                's', 'y' -> 0.52f
+                'r' -> 0.395f
+                't' -> 0.37f
+                'i', '.' -> 0.29f
+                ' ' -> 0.28f
+                else -> if (ch.isUpperCase()) 0.68f else 0.55f
+            }
+        }
+        return rawEm
+    }
+
+    /**
+     * Computes a single-line text size in `sp` for the weekday headline so long weekdays
+     * (such as `"Wednesday."`) or narrower widget sizes resize down instead of wrapping.
+     */
+    fun computeWeekdayTextSizeSp(
+        weekdayText: String,
+        availableWidthDp: Float = DEFAULT_AVAILABLE_WEEKDAY_WIDTH_DP,
+        fontScale: Float = 1f,
+        measuredWidthEm: Float? = null,
+        maxTextSizeSp: Float = DEFAULT_WEEKDAY_TEXT_SIZE_SP,
+        minTextSizeSp: Float = MIN_WEEKDAY_TEXT_SIZE_SP,
+    ): Float {
+        if (weekdayText.isBlank()) return maxTextSizeSp
+        val safeFontScale = fontScale.takeIf { it.isFinite() && it > 0f } ?: 1f
+        val safeAvailableWidthSp = availableWidthDp.coerceAtLeast(MIN_AVAILABLE_WEEKDAY_WIDTH_DP) / safeFontScale
+        val widthEm = maxOf(
+            estimateWeekdayWidthEm(weekdayText),
+            measuredWidthEm?.takeIf { it.isFinite() && it > 0f } ?: 0f,
+        )
+        if (widthEm <= 0f) return maxTextSizeSp
+        val fittedSp = safeAvailableWidthSp / widthEm
+        return fittedSp.coerceIn(minTextSizeSp, maxTextSizeSp)
+    }
 
     /**
      * Renders the weekday headline (e.g. "Sunday.") with a subtle character-by-character

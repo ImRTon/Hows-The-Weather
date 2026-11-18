@@ -6,9 +6,14 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.media.AudioManager
+import android.os.Build
 import android.os.Bundle
+import android.text.TextPaint
 import android.text.format.DateFormat
+import android.util.TypedValue
 import android.widget.RemoteViews
 import com.rton.howstheweather.MainActivity
 import com.rton.howstheweather.R
@@ -32,8 +37,10 @@ class WeatherDesktopWidgetProvider : AppWidgetProvider() {
         appWidgetIds: IntArray,
     ) {
         val summary = WidgetWeatherStore.read(context)
-        val views = buildRemoteViews(context, summary)
+        val now = ZonedDateTime.now()
         appWidgetIds.forEach { id ->
+            val options = runCatching { appWidgetManager.getAppWidgetOptions(id) }.getOrNull()
+            val views = buildRemoteViews(context, summary, now = now, options = options)
             appWidgetManager.updateAppWidget(id, views)
         }
         triggerAsyncWeatherRefresh(context, force = false)
@@ -47,7 +54,10 @@ class WeatherDesktopWidgetProvider : AppWidgetProvider() {
     ) {
         super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
         val summary = WidgetWeatherStore.read(context)
-        appWidgetManager.updateAppWidget(appWidgetId, buildRemoteViews(context, summary))
+        appWidgetManager.updateAppWidget(
+            appWidgetId,
+            buildRemoteViews(context, summary, options = newOptions),
+        )
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -95,6 +105,7 @@ class WeatherDesktopWidgetProvider : AppWidgetProvider() {
         private const val REQUEST_OPEN_APP = 1001
         private const val REQUEST_OPEN_SEARCH = 1002
         private const val REQUEST_OPEN_VOLUME = 1003
+        private const val REQUEST_OPEN_LENS = 1004
 
         fun updateAllWidgets(
             context: Context,
@@ -104,8 +115,12 @@ class WeatherDesktopWidgetProvider : AppWidgetProvider() {
             val manager = AppWidgetManager.getInstance(appContext)
             val ids = manager.getAppWidgetIds(ComponentName(appContext, WeatherDesktopWidgetProvider::class.java))
             if (ids.isEmpty()) return
-            val views = buildRemoteViews(appContext, summary)
-            manager.updateAppWidget(ids, views)
+            val now = ZonedDateTime.now()
+            ids.forEach { id ->
+                val options = runCatching { manager.getAppWidgetOptions(id) }.getOrNull()
+                val views = buildRemoteViews(appContext, summary, now = now, options = options)
+                manager.updateAppWidget(id, views)
+            }
         }
 
         fun updateVolumeOnly(context: Context) {
@@ -124,11 +139,13 @@ class WeatherDesktopWidgetProvider : AppWidgetProvider() {
             context: Context,
             summary: WidgetWeatherSummary?,
             now: ZonedDateTime = ZonedDateTime.now(),
+            options: Bundle? = null,
         ): RemoteViews {
             val views = RemoteViews(context.packageName, R.layout.weather_desktop_widget)
+            val weekdayText = WidgetWeatherFormatter.formatWeekday(now)
 
             views.setTextViewText(R.id.widget_its_label, context.getString(R.string.widget_its_text))
-            views.setTextViewText(R.id.widget_weekday_text, WidgetWeatherFormatter.formatWeekdaySpanned(now))
+            configureWeekdayHeadline(context, views, weekdayText, now, options)
             views.setTextViewText(R.id.widget_date_text, WidgetWeatherFormatter.formatDateOnly(now))
             views.setTextViewText(
                 R.id.widget_location_text,
@@ -182,6 +199,20 @@ class WeatherDesktopWidgetProvider : AppWidgetProvider() {
             )
             views.setOnClickPendingIntent(R.id.widget_search_bar, searchPendingIntent)
 
+            val lensIntent = Intent(context, WidgetSearchActivity::class.java).apply {
+                action = WidgetSearchActivity.ACTION_OPEN_LENS
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            views.setOnClickPendingIntent(
+                R.id.widget_lens_button,
+                PendingIntent.getActivity(
+                    context,
+                    REQUEST_OPEN_LENS,
+                    lensIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+
             // 3. Tap media volume bar -> Open translucent draggable volume slider overlay
             val volumeIntent = Intent(context, WidgetVolumeDialogActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -195,6 +226,58 @@ class WeatherDesktopWidgetProvider : AppWidgetProvider() {
             views.setOnClickPendingIntent(R.id.widget_volume_touch_area, volumePendingIntent)
 
             return views
+        }
+
+        private fun configureWeekdayHeadline(
+            context: Context,
+            views: RemoteViews,
+            weekdayText: String,
+            now: ZonedDateTime,
+            options: Bundle?,
+        ) {
+            val spannedWeekday = WidgetWeatherFormatter.formatWeekdaySpanned(now)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // XML configures uniform auto-sizing (22sp..50sp, 1px step granularity) across match_parent
+                views.setTextViewText(R.id.widget_weekday_text, spannedWeekday)
+            } else {
+                val weekdayTextSizeSp = resolveWeekdayTextSizeSp(context, weekdayText, options)
+                views.setTextViewTextSize(
+                    R.id.widget_weekday_text,
+                    TypedValue.COMPLEX_UNIT_SP,
+                    weekdayTextSizeSp,
+                )
+                views.setTextViewText(R.id.widget_weekday_text, spannedWeekday)
+            }
+        }
+
+        private fun resolveWeekdayTextSizeSp(
+            context: Context,
+            weekdayText: String,
+            options: Bundle?,
+        ): Float {
+            val minWidthDp = options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 0) ?: 0
+            val availableWidthDp = WidgetWeatherFormatter.resolveAvailableWeekdayWidthDp(minWidthDp)
+            val fontScale = context.resources.configuration.fontScale.takeIf { it.isFinite() && it > 0f } ?: 1f
+            val measuredEm = measureWeekdayWidthEm(weekdayText)
+            return WidgetWeatherFormatter.computeWeekdayTextSizeSp(
+                weekdayText = weekdayText,
+                availableWidthDp = availableWidthDp,
+                fontScale = fontScale,
+                measuredWidthEm = measuredEm,
+            )
+        }
+
+        private fun measureWeekdayWidthEm(weekdayText: String): Float? {
+            if (weekdayText.isEmpty()) return null
+            val paint = runCatching {
+                TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    textSize = 100f
+                }
+            }.getOrNull() ?: return null
+            val widthPx = runCatching { paint.measureText(weekdayText) }.getOrNull() ?: return null
+            if (!widthPx.isFinite() || widthPx <= 0f) return null
+            return widthPx / 100f
         }
 
         private fun readMediaVolume(context: Context): Pair<Int, Int> {

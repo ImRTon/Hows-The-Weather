@@ -35,11 +35,16 @@
 
         <TextView
             android:id="@+id/widget_weekday_text"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="-6dp"
+            android:autoSizeMaxTextSize="50sp"
+            android:autoSizeMinTextSize="22sp"
+            android:autoSizeStepGranularity="1px"
+            android:autoSizeTextType="uniform"
             android:fontFamily="sans-serif"
             android:includeFontPadding="false"
+            android:maxLines="1"
             android:shadowColor="#66000000"
             android:shadowDx="0"
             android:shadowDy="2"
@@ -106,23 +111,38 @@
             android:textSize="11.5sp" />
     </LinearLayout>
 
-    <!-- Pill search bar (opens Google Search app) -->
+    <!-- Separate 48 dp targets for Google Search and Lens; keep the visible pill 36 dp. -->
     <FrameLayout
         android:id="@+id/widget_search_bar"
         android:layout_width="match_parent"
-        android:layout_height="36dp"
+        android:layout_height="48dp"
         android:layout_marginTop="7dp"
-        android:background="@drawable/bg_widget_search_pill"
         android:contentDescription="@string/widget_google_search_desc">
 
         <ImageView
-            android:id="@+id/widget_search_circle"
-            android:layout_width="26dp"
-            android:layout_height="26dp"
-            android:layout_gravity="end|center_vertical"
-            android:layout_marginEnd="5dp"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_gravity="center_vertical"
             android:importantForAccessibility="no"
-            android:src="@drawable/bg_widget_search_circle" />
+            android:background="@drawable/bg_widget_search_pill" />
+
+        <FrameLayout
+            android:id="@+id/widget_lens_button"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="end|center_vertical"
+            android:contentDescription="@string/widget_google_lens_desc"
+            android:focusable="true">
+
+            <ImageView
+                android:id="@+id/widget_search_circle"
+                android:layout_width="26dp"
+                android:layout_height="26dp"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="5dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/bg_widget_search_circle" />
+        </FrameLayout>
     </FrameLayout>
 
     <!-- Media volume bar (sleek horizontal bar below search bar) -->

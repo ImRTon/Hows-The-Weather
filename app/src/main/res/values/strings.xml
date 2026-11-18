@@ -6,5 +6,7 @@
     <string name="widget_default_date">November 15</string>
     <string name="widget_open_weather_desc">Open How’s the Weather and refresh forecast</string>
     <string name="widget_google_search_desc">Open Google Search</string>
+    <string name="widget_google_lens_desc">開啟 Google 智慧鏡頭</string>
+    <string name="widget_google_lens_unavailable">無法開啟 Google 智慧鏡頭，請安裝或更新 Google 應用程式，並確認已啟用。</string>
     <string name="widget_media_volume_desc">Adjust media volume</string>
 </resources>

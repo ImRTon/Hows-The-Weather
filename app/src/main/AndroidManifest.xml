@@ -7,6 +7,7 @@
 
     <queries>
         <package android:name="com.google.android.googlequicksearchbox" />
+        <package android:name="com.google.ar.lens" />
         <intent>
             <action android:name="android.search.action.GLOBAL_SEARCH" />
         </intent>

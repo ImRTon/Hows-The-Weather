@@ -12,6 +12,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WidgetWeatherFormatterTest {
@@ -101,5 +102,25 @@ class WidgetWeatherFormatterTest {
             renderedText,
         )
         assertFalse(renderedText.contains("'"))
+    }
+
+    @Test
+    fun `resizes Wednesday and narrow widgets to fit on a single line`() {
+        val defaultWidthDp = WidgetWeatherFormatter.resolveAvailableWeekdayWidthDp(0)
+        val sundaySp = WidgetWeatherFormatter.computeWeekdayTextSizeSp("Sunday.", defaultWidthDp)
+        val thursdaySp = WidgetWeatherFormatter.computeWeekdayTextSizeSp("Thursday.", defaultWidthDp)
+        val wednesdaySp = WidgetWeatherFormatter.computeWeekdayTextSizeSp("Wednesday.", defaultWidthDp)
+
+        assertEquals(50f, sundaySp, 0.01f)
+        assertEquals(50f, thursdaySp, 0.01f)
+        assertTrue("Expected Wednesday. to stay close to 50sp, was $wednesdaySp", wednesdaySp in 46f..49.5f)
+        assertTrue(
+            "Expected Wednesday. rendered width to fit within $defaultWidthDp dp",
+            wednesdaySp * WidgetWeatherFormatter.estimateWeekdayWidthEm("Wednesday.") <= defaultWidthDp + 0.01f,
+        )
+
+        val narrowWidthDp = WidgetWeatherFormatter.resolveAvailableWeekdayWidthDp(180)
+        val narrowMondaySp = WidgetWeatherFormatter.computeWeekdayTextSizeSp("Monday.", narrowWidthDp)
+        assertTrue("Expected narrow widget to shrink Monday., was $narrowMondaySp", narrowMondaySp < 35f)
     }
 }

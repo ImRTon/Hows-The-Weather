@@ -153,7 +153,7 @@ data class WeatherRenderStyle(
                 colorLut = PerceptualColorLut.create(anchors),
                 contours = contours,
                 opacity = opacity,
-                contourColor = if (theme == RenderTheme.DARK) 0xB8FFF4DA.toInt() else 0xB84A2718.toInt(),
+                contourColor = if (theme == RenderTheme.DARK) 0x48FFF4DA.toInt() else 0x484A2718.toInt(),
             )
         }
     }
