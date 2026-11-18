@@ -76,7 +76,26 @@ class CwaQuantitativeForecastImageParser {
 
     internal fun decodeRain(argb: Int): Float? {
         if (argb ushr 24 and 0xff < MIN_ALPHA) return null
-        return RAIN_PALETTE[argb and 0x00ffffff]
+        val rgb = argb and 0x00ffffff
+        RAIN_PALETTE[rgb]?.let { return it }
+        // Accept 1-LSB anti-aliased / quantised boundary pixels (L∞ <= 2) so county/tier seams
+        // do not drop out while keeping titles, coastlines, land white, and sea blue excluded.
+        val r = rgb ushr 16 and 0xff
+        val g = rgb ushr 8 and 0xff
+        val b = rgb and 0xff
+        var bestAmount: Float? = null
+        var bestDist = MAX_CHANNEL_TOLERANCE + 1
+        for (i in PALETTE_COLORS.indices) {
+            val pr = PALETTE_R[i]
+            val pg = PALETTE_G[i]
+            val pb = PALETTE_B[i]
+            val d = maxOf(kotlin.math.abs(r - pr), kotlin.math.abs(g - pg), kotlin.math.abs(b - pb))
+            if (d < bestDist) {
+                bestDist = d
+                bestAmount = PALETTE_AMOUNTS[i]
+            }
+        }
+        return bestAmount
     }
 
     internal fun decodeSample(
@@ -87,21 +106,38 @@ class CwaQuantitativeForecastImageParser {
         pixels: IntArray,
     ): Float {
         if (centerX in 0 until width && centerY in 0 until height) {
-            decodeRain(pixels[centerY * width + centerX])?.let { return it }
+            val centerPixel = pixels[centerY * width + centerX]
+            decodeRain(centerPixel)?.let { return it }
+            // Dry land (white) or ocean background (light blue) at the sample center is genuinely 0 mm;
+            // only dark annotation/coastline/border strokes should be inpainted from neighbors.
+            if (isChartBackground(centerPixel)) return 0f
         }
-        var total = 0f
-        var count = 0
-        for (dy in -1..1) for (dx in -1..1) {
-            if (dx == 0 && dy == 0) continue
-            val x = centerX + dx
-            val y = centerY + dy
-            if (x !in 0 until width || y !in 0 until height) continue
-            decodeRain(pixels[y * width + x])?.let { value ->
-                total += value
-                count += 1
+        for (radius in 1..MAX_INPAINT_RADIUS) {
+            var total = 0f
+            var count = 0
+            for (dy in -radius..radius) for (dx in -radius..radius) {
+                if (kotlin.math.abs(dx) != radius && kotlin.math.abs(dy) != radius) continue
+                val x = centerX + dx
+                val y = centerY + dy
+                if (x !in 0 until width || y !in 0 until height) continue
+                decodeRain(pixels[y * width + x])?.let { value ->
+                    total += value
+                    count += 1
+                }
             }
+            if (count > 0) return total / count
         }
-        return if (count == 0) 0f else total / count
+        return 0f
+    }
+
+    private fun isChartBackground(argb: Int): Boolean {
+        if (argb ushr 24 and 0xff < MIN_ALPHA) return true
+        val r = argb ushr 16 and 0xff
+        val g = argb ushr 8 and 0xff
+        val b = argb and 0xff
+        // White land fill (#FFFFFF) or pale sky-blue sea fill (#EDF9FE) — both have high luminance
+        // and minimal saturation, distinct from dark county/coastline strokes and grey 0.5 mm (#C2C2C2).
+        return r >= 230 && g >= 242 && b >= 248
     }
 
     internal fun sourcePixel(longitude: Double, latitude: Double): Pair<Double, Double> {
@@ -133,11 +169,13 @@ class CwaQuantitativeForecastImageParser {
     } ?: error("缺少定量降水欄位：${keys.joinToString()}")
 
     private companion object {
-        const val OUTPUT_WIDTH = 128
-        const val OUTPUT_HEIGHT = 170
+        const val OUTPUT_WIDTH = 160
+        const val OUTPUT_HEIGHT = 212
         const val REFERENCE_IMAGE_WIDTH = 1245.0
         const val REFERENCE_IMAGE_HEIGHT = 1500.0
         const val MIN_ALPHA = 240
+        const val MAX_CHANNEL_TOLERANCE = 2
+        const val MAX_INPAINT_RADIUS = 3
         const val OFFICIAL_GRID_RESOLUTION_KM = 2.5
         const val DISPLAY_LATITUDE_NUDGE_DEGREES = 0.02
         val SOURCE_BOUNDS = GeoBounds(south = 21.7, west = 119.2, north = 25.5, east = 122.2)
@@ -199,5 +237,10 @@ class CwaQuantitativeForecastImageParser {
             rgb(251, 0, 255) to 200f,
             rgb(255, 206, 255) to 300f,
         )
+        val PALETTE_COLORS = RAIN_PALETTE.keys.toIntArray()
+        val PALETTE_R = IntArray(PALETTE_COLORS.size) { PALETTE_COLORS[it] ushr 16 and 0xff }
+        val PALETTE_G = IntArray(PALETTE_COLORS.size) { PALETTE_COLORS[it] ushr 8 and 0xff }
+        val PALETTE_B = IntArray(PALETTE_COLORS.size) { PALETTE_COLORS[it] and 0xff }
+        val PALETTE_AMOUNTS = RAIN_PALETTE.values.toFloatArray()
     }
 }

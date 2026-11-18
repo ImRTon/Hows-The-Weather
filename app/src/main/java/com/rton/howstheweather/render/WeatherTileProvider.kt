@@ -148,14 +148,14 @@ class WeatherTileProvider(
         }
         if (values != null) {
             for (py in values.indices) for (px in values[py].indices) {
-                val value = grid.sampleOrNaN(latitudes[py], longitudes[px])
+                val value = grid.sampleForDisplayOrNaN(latitudes[py], longitudes[px])
                 values[py][px] = value
             }
         }
         for (py in 0 until renderSize) {
             for (px in 0 until renderSize) {
                 val value = if (values == null) {
-                    grid.sampleOrNaN(latitudes[py], longitudes[px])
+                    grid.sampleForDisplayOrNaN(latitudes[py], longitudes[px])
                 } else {
                     values[py + CONTOUR_GUTTER][px + CONTOUR_GUTTER]
                 }
@@ -186,26 +186,104 @@ class WeatherTileProvider(
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = this@WeatherTileProvider.style.contourColor
+            style = Paint.Style.STROKE
             strokeWidth = 1.25f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
         }
         style.contours.forEach { threshold ->
-            for (py in 0 until size) {
-                for (px in 0 until size) {
-                    val sampleX = px + CONTOUR_GUTTER
-                    val sampleY = py + CONTOUR_GUTTER
-                    val value = values[sampleY][sampleX]
-                    if (!value.isFinite()) continue
-                    val crosses = crossesThreshold(value, values[sampleY][sampleX + 1], threshold) ||
-                        crossesThreshold(value, values[sampleY + 1][sampleX], threshold)
-                    if (crosses) canvas.drawPoint(px.toFloat(), py.toFloat(), paint)
+            for (sy in 0..size) {
+                val row0 = values[sy]
+                val row1 = values[sy + 1]
+                val y0 = (sy - CONTOUR_GUTTER).toFloat()
+                val y1 = y0 + 1f
+                for (sx in 0..size) {
+                    val v00 = row0[sx]
+                    val v10 = row0[sx + 1]
+                    val v11 = row1[sx + 1]
+                    val v01 = row1[sx]
+                    if (!v00.isFinite() || !v10.isFinite() || !v11.isFinite() || !v01.isFinite()) continue
+                    var mask = 0
+                    if (v00 >= threshold) mask = mask or 1
+                    if (v10 >= threshold) mask = mask or 2
+                    if (v11 >= threshold) mask = mask or 4
+                    if (v01 >= threshold) mask = mask or 8
+                    if (mask == 0 || mask == 15) continue
+                    val x0 = (sx - CONTOUR_GUTTER).toFloat()
+                    val x1 = x0 + 1f
+                    drawMarchingSquareCell(
+                        canvas = canvas,
+                        paint = paint,
+                        mask = mask,
+                        x0 = x0,
+                        y0 = y0,
+                        x1 = x1,
+                        y1 = y1,
+                        v00 = v00,
+                        v10 = v10,
+                        v11 = v11,
+                        v01 = v01,
+                        threshold = threshold,
+                    )
                 }
             }
         }
     }
 
-    private fun crossesThreshold(first: Float, second: Float, threshold: Float): Boolean =
-        first.isFinite() && second.isFinite() &&
-            ((first < threshold && second >= threshold) || (first >= threshold && second < threshold))
+    private fun drawMarchingSquareCell(
+        canvas: Canvas,
+        paint: Paint,
+        mask: Int,
+        x0: Float,
+        y0: Float,
+        x1: Float,
+        y1: Float,
+        v00: Float,
+        v10: Float,
+        v11: Float,
+        v01: Float,
+        threshold: Float,
+    ) {
+        fun topX(): Float = x0 + edgeFraction(v00, v10, threshold)
+        fun rightY(): Float = y0 + edgeFraction(v10, v11, threshold)
+        fun bottomX(): Float = x0 + edgeFraction(v01, v11, threshold)
+        fun leftY(): Float = y0 + edgeFraction(v00, v01, threshold)
+
+        when (mask) {
+            1, 14 -> canvas.drawLine(x0, leftY(), topX(), y0, paint)
+            2, 13 -> canvas.drawLine(topX(), y0, x1, rightY(), paint)
+            4, 11 -> canvas.drawLine(x1, rightY(), bottomX(), y1, paint)
+            8, 7 -> canvas.drawLine(x0, leftY(), bottomX(), y1, paint)
+            3, 12 -> canvas.drawLine(x0, leftY(), x1, rightY(), paint)
+            6, 9 -> canvas.drawLine(topX(), y0, bottomX(), y1, paint)
+            5 -> {
+                val center = 0.25f * (v00 + v10 + v11 + v01)
+                if (center >= threshold) {
+                    canvas.drawLine(x0, leftY(), bottomX(), y1, paint)
+                    canvas.drawLine(topX(), y0, x1, rightY(), paint)
+                } else {
+                    canvas.drawLine(x0, leftY(), topX(), y0, paint)
+                    canvas.drawLine(bottomX(), y1, x1, rightY(), paint)
+                }
+            }
+            10 -> {
+                val center = 0.25f * (v00 + v10 + v11 + v01)
+                if (center >= threshold) {
+                    canvas.drawLine(x0, leftY(), topX(), y0, paint)
+                    canvas.drawLine(bottomX(), y1, x1, rightY(), paint)
+                } else {
+                    canvas.drawLine(x0, leftY(), bottomX(), y1, paint)
+                    canvas.drawLine(topX(), y0, x1, rightY(), paint)
+                }
+            }
+        }
+    }
+
+    private fun edgeFraction(a: Float, b: Float, threshold: Float): Float {
+        val denom = b - a
+        if (kotlin.math.abs(denom) < 1e-6f) return 0.5f
+        return ((threshold - a) / denom).coerceIn(0f, 1f)
+    }
 
     private fun intersectsGrid(grid: WeatherGrid, tileX: Int, tileY: Int, zoom: Int): Boolean {
         val northWest = tilePixelToGeo(tileX, tileY, zoom, 0, 0)
@@ -236,7 +314,7 @@ class WeatherTileProvider(
         const val TILE_SIZE = 256
         private const val PIXEL_CENTER = 0.5
         private const val CONTOUR_GUTTER = 1
-        private const val RENDERER_VERSION = 4
+        private const val RENDERER_VERSION = 5
         private const val CACHE_BYTES = 24 * 1024 * 1024
         private val EMPTY_TILE = ByteArray(0)
         private val renderLocks = ConcurrentHashMap<String, Any>()

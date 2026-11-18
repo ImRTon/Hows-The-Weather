@@ -67,6 +67,158 @@ data class WeatherGrid(
     }
 
     /**
+     * Render-only C¹ monotonic Catmull-Rom (bicubic) sampler for map tile rendering.
+     *
+     * Unlike [sampleOrNaN] (which feeds domain decisions and strictly requires all four corners
+     * to be finite), this sampler:
+     * 1. eliminates bilinear C⁰ slope creases along grid lines when zoomed in,
+     * 2. clamps each 1D cubic pass to the `[min, max]` of its central cell pair so it never
+     *    overshoots peaks or invents negative rain, and
+     * 3. treats `-99` missing sentinels in precipitation grids (`F-B0046-001` encodes dry outer
+     *    cells as `-99`) with coverage-weighted bilinear tapering so isolated cells and outer
+     *    rings are not eroded by a full cell width.
+     */
+    fun sampleForDisplayOrNaN(latitude: Double, longitude: Double): Float {
+        val gridLongitude = if (bounds.east > 180.0 && longitude < bounds.west) longitude + 360.0 else longitude
+        if (latitude !in bounds.south..bounds.north || gridLongitude !in bounds.west..bounds.east) return Float.NaN
+        val fx = ((gridLongitude - bounds.west) / (bounds.east - bounds.west) * (width - 1))
+            .coerceIn(0.0, (width - 1).toDouble())
+        val fy = ((bounds.north - latitude) / (bounds.north - bounds.south) * (height - 1))
+            .coerceIn(0.0, (height - 1).toDouble())
+        val x1 = fx.toInt().coerceAtMost(width - 2)
+        val y1 = fy.toInt().coerceAtMost(height - 2)
+        val tx = (fx - x1).toFloat()
+        val ty = (fy - y1).toFloat()
+
+        val c00 = validOrNaN(valueAt(x1, y1))
+        val c10 = validOrNaN(valueAt(x1 + 1, y1))
+        val c01 = validOrNaN(valueAt(x1, y1 + 1))
+        val c11 = validOrNaN(valueAt(x1 + 1, y1 + 1))
+        if (c00.isNaN() || c10.isNaN() || c01.isNaN() || c11.isNaN()) {
+            return samplePartialCellOrNaN(c00, c10, c01, c11, tx, ty)
+        }
+
+        val x0 = (x1 - 1).coerceAtLeast(0)
+        val x2 = x1 + 1
+        val x3 = (x1 + 2).coerceAtMost(width - 1)
+        val y0 = (y1 - 1).coerceAtLeast(0)
+        val y2 = y1 + 1
+        val y3 = (y1 + 2).coerceAtMost(height - 1)
+
+        val wx0 = catmullRomW0(tx)
+        val wx1 = catmullRomW1(tx)
+        val wx2 = catmullRomW2(tx)
+        val wx3 = catmullRomW3(tx)
+
+        val row1 = cubicRowClamped(x0, x1, x2, x3, y1, c00, c10, wx0, wx1, wx2, wx3)
+        val row2 = cubicRowClamped(x0, x1, x2, x3, y2, c01, c11, wx0, wx1, wx2, wx3)
+        val row0 = cubicRowOuter(x0, x1, x2, x3, y0, row1, wx0, wx1, wx2, wx3)
+        val row3 = cubicRowOuter(x0, x1, x2, x3, y3, row2, wx0, wx1, wx2, wx3)
+
+        val wy0 = catmullRomW0(ty)
+        val wy1 = catmullRomW1(ty)
+        val wy2 = catmullRomW2(ty)
+        val wy3 = catmullRomW3(ty)
+        val raw = wy0 * row0 + wy1 * row1 + wy2 * row2 + wy3 * row3
+        val low = minOf(row1, row2)
+        val high = maxOf(row1, row2)
+        return raw.coerceIn(low, high)
+    }
+
+    private fun validOrNaN(v: Float): Float =
+        if (v.isFinite() && v != missingValue) v else Float.NaN
+
+    private fun validOrFallback(x: Int, y: Int, fallback: Float): Float {
+        val v = valueAt(x, y)
+        return if (v.isFinite() && v != missingValue) v else fallback
+    }
+
+    private fun cubicRowClamped(
+        x0: Int,
+        x1: Int,
+        x2: Int,
+        x3: Int,
+        y: Int,
+        v1: Float,
+        v2: Float,
+        w0: Float,
+        w1: Float,
+        w2: Float,
+        w3: Float,
+    ): Float {
+        val v0 = validOrFallback(x0, y, v1)
+        val v3 = validOrFallback(x3, y, v2)
+        val raw = w0 * v0 + w1 * v1 + w2 * v2 + w3 * v3
+        return raw.coerceIn(minOf(v1, v2), maxOf(v1, v2))
+    }
+
+    private fun cubicRowOuter(
+        x0: Int,
+        x1: Int,
+        x2: Int,
+        x3: Int,
+        y: Int,
+        fallbackRow: Float,
+        w0: Float,
+        w1: Float,
+        w2: Float,
+        w3: Float,
+    ): Float {
+        val v1 = validOrNaN(valueAt(x1, y))
+        val v2 = validOrNaN(valueAt(x2, y))
+        if (v1.isNaN() || v2.isNaN()) return fallbackRow
+        val v0 = validOrFallback(x0, y, v1)
+        val v3 = validOrFallback(x3, y, v2)
+        val raw = w0 * v0 + w1 * v1 + w2 * v2 + w3 * v3
+        return raw.coerceIn(minOf(v1, v2), maxOf(v1, v2))
+    }
+
+    private fun samplePartialCellOrNaN(
+        c00: Float,
+        c10: Float,
+        c01: Float,
+        c11: Float,
+        tx: Float,
+        ty: Float,
+    ): Float {
+        // Luminance/radar grids use NaN only outside the sensor mask; keep that boundary crisp.
+        // Precipitation grids (`F-B0046-001`) encode dry cells as `-99` (`NaN`), so tapering
+        // valid corners against 0 prevents eroding 1 cell ring and deleting isolated rain cells.
+        val taperAgainstZero = unit == WeatherUnit.MILLIMETERS_ONE_HOUR ||
+            unit == WeatherUnit.MILLIMETERS_PER_HOUR ||
+            unit == WeatherUnit.MILLIMETERS_TWELVE_HOURS
+        if (!taperAgainstZero) return Float.NaN
+        var weightedSum = 0f
+        var validWeight = 0f
+        val w00 = (1f - tx) * (1f - ty)
+        val w10 = tx * (1f - ty)
+        val w01 = (1f - tx) * ty
+        val w11 = tx * ty
+        if (!c00.isNaN()) {
+            weightedSum += c00 * w00
+            validWeight += w00
+        }
+        if (!c10.isNaN()) {
+            weightedSum += c10 * w10
+            validWeight += w10
+        }
+        if (!c01.isNaN()) {
+            weightedSum += c01 * w01
+            validWeight += w01
+        }
+        if (!c11.isNaN()) {
+            weightedSum += c11 * w11
+            validWeight += w11
+        }
+        return if (validWeight <= 0f) Float.NaN else weightedSum
+    }
+
+    private fun catmullRomW0(t: Float): Float = t * (-0.5f + t * (1f - 0.5f * t))
+    private fun catmullRomW1(t: Float): Float = 1f + t * t * (-2.5f + 1.5f * t)
+    private fun catmullRomW2(t: Float): Float = t * (0.5f + t * (2f - 1.5f * t))
+    private fun catmullRomW3(t: Float): Float = t * t * (-0.5f + 0.5f * t)
+
+    /**
      * Creates a render-only temporal frame between two compatible numerical grids.
      * Official observations remain unchanged; this derived grid must not feed decisions.
      */

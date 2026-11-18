@@ -116,4 +116,37 @@ class WeatherGridTest {
             RadarCoverageSelector.select(RadarCoverage.LOCAL, 12f, GeoPoint(35.0, 139.0), localBounds),
         )
     }
+
+    @Test fun `display sampler stays bounded between central cell values and preserves isolated rain cells`() {
+        val cubicGrid = WeatherGrid(
+            width = 4,
+            height = 4,
+            values = floatArrayOf(
+                0f, 0f, 0f, 0f,
+                0f, 10f, 40f, 40f,
+                0f, 10f, 40f, 40f,
+                0f, 0f, 0f, 0f,
+            ),
+            unit = WeatherUnit.DBZ,
+            bounds = GeoBounds(0.0, 0.0, 3.0, 3.0),
+            resolutionKm = 1.25,
+            validAt = Instant.EPOCH,
+            sourceId = "cubic-fixture",
+        )
+        for (i in 0..10) {
+            val lon = 1.0 + i * 0.1
+            val sampled = cubicGrid.sampleForDisplayOrNaN(1.5, lon)
+            assertTrue("Expected bounded sample in [10, 40] but was $sampled", sampled in 10f..40f)
+        }
+
+        // In F-B0046-001, -99 becomes NaN for dry cells. Display sampling tapers valid rain
+        // corners against zero while domain sample() stays strict.
+        val sparseRain = grid.copy(
+            unit = WeatherUnit.MILLIMETERS_ONE_HOUR,
+            values = floatArrayOf(12f, Float.NaN, Float.NaN, Float.NaN),
+        )
+        assertNull(sparseRain.sample(GeoPoint(1.5, 0.5)))
+        val displaySample = sparseRain.sampleForDisplayOrNaN(1.5, 0.5)
+        assertEquals(6.75f, displaySample, 0.001f)
+    }
 }

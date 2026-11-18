@@ -615,13 +615,17 @@ class CwaWeatherDataSource(
         }
         return withContext(PREPROCESSING_DISPATCHER) {
             StartupDiagnostics.measure("weather.radar.decode source=$datasetId") {
-                val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+                // Full-resolution decode + block aggregation (sampleSize = 8 -> 8x8, 4 -> 4x4)
+                // preserves thin bands and small convective cells that BitmapFactory.inSampleSize
+                // point-sampling would drop or flicker across history frames.
+                val options = BitmapFactory.Options().apply {
+                    inSampleSize = 1
+                    inScaled = false
+                }
                 val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
                     ?: error("CWA 雷達影像解碼失敗")
                 try {
-                    val pixels = IntArray(image.width * image.height)
-                    image.getPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
-                    radarImageParser.toGrid(metadata, image.width, image.height, pixels, datasetId)
+                    radarImageParser.toGrid(image, metadata, datasetId, sampleSize)
                 } finally {
                     image.recycle()
                 }

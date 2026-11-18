@@ -108,10 +108,10 @@ Radar and rainfall production paths must consume numerical grids. Never download
 
 The renderer uses:
 
-- bounded bilinear interpolation only between adjacent source cells;
-- a 256-entry OKLab-interpolated LUT;
+- bounded bilinear interpolation for domain sampling (`sample()`), and missing-aware monotonic Catmull-Rom / bicubic display resampling (`sampleForDisplayOrNaN()`) for map tile rendering so zoomed-in layers do not exhibit C⁰ bilinear grid creases or drop isolated precipitation cells next to `-99` sentinels;
+- a 256-entry OKLab-interpolated LUT with monotonic PCHIP stop normalization and soft threshold alpha ramp-in;
 - cold cyan/blue for weak values, then violet, magenta, orange, and warm light tones for stronger values;
-- marching-style threshold contours from the same numerical grid;
+- sub-pixel marching-squares vector threshold contours from the same numerical grid;
 - transparent pixels for values below the visible threshold or outside valid data.
 
 Physical stops:

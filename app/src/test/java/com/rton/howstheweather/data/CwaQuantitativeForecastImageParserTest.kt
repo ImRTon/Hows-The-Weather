@@ -57,6 +57,16 @@ class CwaQuantitativeForecastImageParserTest {
     }
 
     @Test
+    fun `near-palette anti-aliased swatch pixel and multi-pixel border inpainting are recovered`() {
+        // 1-LSB off from (3, 200, 255) = 2 mm in F-C0035 PNGs:
+        assertEquals(2f, parser.decodeRain(argb(3, 201, 255)))
+        // 2-px wide black county border surrounded by 10 mm at radius 2 is inpainted:
+        val pixels = IntArray(5 * 5) { argb(0, 0, 0) }
+        pixels[0] = argb(3, 99, 255)
+        assertEquals(10f, parser.decodeSample(2, 2, 5, 5, pixels))
+    }
+
+    @Test
     fun `multi point calibration follows Taiwan chart projection`() {
         val north = parser.sourcePixel(longitude = 121.536, latitude = 25.298)
         val center = parser.sourcePixel(longitude = 121.0, latitude = 23.6)
