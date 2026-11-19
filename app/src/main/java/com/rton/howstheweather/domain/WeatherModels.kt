@@ -319,6 +319,12 @@ data class AreaForecastPeriod(
     val weatherDescription: String,
     val weatherCode: String?,
     val relativeHumidityPercent: Int? = null,
+    /** CWA 體感溫度 range within the period, as published; never derived from the map. */
+    val minimumApparentTemperatureCelsius: Int? = null,
+    val maximumApparentTemperatureCelsius: Int? = null,
+    val windSpeedMetersPerSecond: Int? = null,
+    /** Daytime UV index; published only by the weekly product. */
+    val uvIndex: Int? = null,
 )
 
 data class AreaForecast(
@@ -408,6 +414,8 @@ data class HomeUiState(
     val isHistoryLoading: Boolean = false,
     val legendExpanded: Boolean = false,
     val themePreference: ThemePreference = ThemePreference.SYSTEM,
+    /** Personal feels-like offset in °C: negative dresses warmer, positive dresses lighter. */
+    val clothingTolerance: Int = 0,
     val activeGrid: WeatherGrid? = null,
     val quantitativeRainGrid: WeatherGrid? = null,
     val quantitativeForecastFrames: List<WeatherGrid> = emptyList(),

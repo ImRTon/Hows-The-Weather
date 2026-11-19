@@ -39,6 +39,8 @@ class CwaAreaForecastParser {
             .associateBy { it.optString("ElementName") }
         val temperatures = elements["溫度"]?.let { hourlyValues(it, "Temperature") }.orEmpty()
         val humidity = elements["相對濕度"]?.let { hourlyValues(it, "RelativeHumidity") }.orEmpty()
+        val apparent = elements["體感溫度"]?.let { hourlyValues(it, "ApparentTemperature") }.orEmpty()
+        val wind = elements["風速"]?.let { hourlyValues(it, "WindSpeed") }.orEmpty()
         val weather = elements["天氣現象"]?.let(::weatherPeriods).orEmpty()
         val probability = listOf("3小時降雨機率", "6小時降雨機率", "12小時降雨機率")
             .firstNotNullOfOrNull(elements::get)
@@ -54,6 +56,12 @@ class CwaAreaForecastParser {
             val humidityInPeriod = humidity
                 .filterKeys { it >= start && it < end }
                 .values
+            val apparentInPeriod = apparent
+                .filterKeys { it >= start && it < end }
+                .values
+            val windInPeriod = wind
+                .filterKeys { it >= start && it < end }
+                .values
             val condition = weather[start to end]
             AreaForecastPeriod(
                 startAt = start,
@@ -66,6 +74,9 @@ class CwaAreaForecastParser {
                 weatherDescription = condition?.first.orEmpty(),
                 weatherCode = condition?.second,
                 relativeHumidityPercent = humidityInPeriod.averageOrNull(),
+                minimumApparentTemperatureCelsius = apparentInPeriod.minOrNull(),
+                maximumApparentTemperatureCelsius = apparentInPeriod.maxOrNull(),
+                windSpeedMetersPerSecond = windInPeriod.maxOrNull(),
             )
         }.sortedBy(AreaForecastPeriod::startAt).take(MAX_THREE_DAY_PERIODS)
         if (periods.isEmpty()) return null
@@ -100,6 +111,10 @@ class CwaAreaForecastParser {
         val minimums = elements["最低溫度"]?.let { periodValues(it, "MinTemperature") }.orEmpty()
         val maximums = elements["最高溫度"]?.let { periodValues(it, "MaxTemperature") }.orEmpty()
         val humidity = elements["平均相對濕度"]?.let { periodValues(it, "RelativeHumidity") }.orEmpty()
+        val minimumApparent = elements["最低體感溫度"]?.let { periodValues(it, "MinApparentTemperature") }.orEmpty()
+        val maximumApparent = elements["最高體感溫度"]?.let { periodValues(it, "MaxApparentTemperature") }.orEmpty()
+        val wind = elements["風速"]?.let { periodValues(it, "WindSpeed") }.orEmpty()
+        val uv = elements["紫外線指數"]?.let { periodValues(it, "UVIndex") }.orEmpty()
         val weather = elements["天氣現象"]?.let(::weatherPeriods).orEmpty()
 
         val periods = objects(probability.opt("Time")).mapNotNull { time ->
@@ -120,6 +135,10 @@ class CwaAreaForecastParser {
                 weatherDescription = condition?.first.orEmpty(),
                 weatherCode = condition?.second,
                 relativeHumidityPercent = humidity[key],
+                minimumApparentTemperatureCelsius = minimumApparent[key],
+                maximumApparentTemperatureCelsius = maximumApparent[key],
+                windSpeedMetersPerSecond = wind[key],
+                uvIndex = uv[key],
             )
         }.sortedBy(AreaForecastPeriod::startAt).take(MAX_WEEKLY_PERIODS)
         if (periods.isEmpty()) return null

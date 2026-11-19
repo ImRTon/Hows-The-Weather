@@ -44,6 +44,12 @@ The decision card leads with one plain-language conclusion, followed by source t
 - In `DEMO_MAP_ID` mode, do not pass a Map ID to Google Maps; use the bundled JSON map style. With a real Map ID, use Cloud Styling and do not combine it with bundled `MapStyleOptions`.
 - If the base map has not loaded after a reasonable timeout, show a specific Maps SDK configuration message rather than leaving an unexplained blank surface.
 
+### Clothing advice
+
+- The Forecast tab shows `怎麼穿` (top, jacket, trousers, hat) for the next 12 hours. `ClothingAdvisor` is pure domain code and reads only official CWA township values: published `體感溫度` (falling back to CWA's formula from temperature, humidity, and wind only when it is missing), rain probability, humidity, wind, and the weekly product's daytime UV index.
+- Tiers come from personal calibration: CWA feels-like 22–28 °C was comfortable in short sleeves, and about 16–17 °C in drizzle needed a light long-sleeve top with a regular jacket. Shirt and trousers use the window midpoint; the jacket uses the window minimum. Damp chill (feels-like below 18 °C with humidity ≥85% or likely rain) subtracts 1.5 °C.
+- A slider from `怕冷` to `怕熱` (−4…+4 °C, persisted in DataStore) shifts every tier. Clothing advice never feeds the rain decision.
+
 ### Status and caption policy
 
 - Successful data-source information must not appear as a persistent snackbar.

@@ -6,6 +6,7 @@ import android.os.SystemClock
 import com.rton.howstheweather.diagnostics.StartupDiagnostics
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
@@ -96,6 +97,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private var panelSelectionChanged = false
     private var windSelectionChanged = false
     private var typhoonSelectionChanged = false
+    private var clothingToleranceChanged = false
     private var typhoonJob: Job? = null
     private var autoRefreshJob: Job? = null
     private var lastRefreshStartedAt = Long.MIN_VALUE / 2
@@ -134,6 +136,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         restorePanelAnchor()
         restoreWindPreference()
         restoreTyphoonPreference()
+        restoreClothingTolerance()
         refresh()
     }
 
@@ -195,6 +198,36 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 _uiState.update { state ->
                     state.copy(layers = state.layers.copy(typhoonEnabled = persistedEnabled))
                 }
+            }
+        }
+    }
+
+    private fun restoreClothingTolerance() {
+        viewModelScope.launch {
+            val persisted = catchingCancellable {
+                getApplication<Application>().userPreferencesDataStore.data.first()[CLOTHING_TOLERANCE_KEY]
+            }.getOrNull() ?: return@launch
+            if (!clothingToleranceChanged) {
+                _uiState.update {
+                    it.copy(
+                        clothingTolerance = persisted.coerceIn(
+                            ClothingAdvisor.TOLERANCE_MIN,
+                            ClothingAdvisor.TOLERANCE_MAX,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun setClothingTolerance(tolerance: Int) {
+        val value = tolerance.coerceIn(ClothingAdvisor.TOLERANCE_MIN, ClothingAdvisor.TOLERANCE_MAX)
+        if (value == _uiState.value.clothingTolerance) return
+        clothingToleranceChanged = true
+        _uiState.update { it.copy(clothingTolerance = value) }
+        viewModelScope.launch {
+            getApplication<Application>().userPreferencesDataStore.edit { preferences ->
+                preferences[CLOTHING_TOLERANCE_KEY] = value
             }
         }
     }
@@ -1330,6 +1363,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         val PANEL_ANCHOR_KEY = stringPreferencesKey("panel_anchor")
         val WIND_ENABLED_KEY = booleanPreferencesKey("wind_enabled")
         val TYPHOON_ENABLED_KEY = booleanPreferencesKey("typhoon_enabled")
+        val CLOTHING_TOLERANCE_KEY = intPreferencesKey("clothing_tolerance")
         const val PANEL_ANCHOR_STATE_KEY = "panelAnchor"
         const val WIND_ENABLED_STATE_KEY = "windEnabled"
         const val TYPHOON_ENABLED_STATE_KEY = "typhoonEnabled"

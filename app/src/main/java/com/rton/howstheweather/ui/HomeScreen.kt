@@ -143,6 +143,7 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
         when (state.destination) {
             AppDestination.FORECAST -> ForecastScreen(
                 state = state,
+                onClothingToleranceChange = viewModel::setClothingTolerance,
                 modifier = Modifier.padding(padding).fillMaxSize(),
             )
             AppDestination.NOW,

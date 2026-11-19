@@ -69,7 +69,9 @@ import androidx.compose.ui.unit.dp
 import com.rton.howstheweather.domain.AirQualityObservation
 import com.rton.howstheweather.domain.AreaForecast
 import com.rton.howstheweather.domain.AreaForecastPeriod
+import com.rton.howstheweather.domain.ClothingAdvisor
 import com.rton.howstheweather.domain.HomeUiState
+import com.rton.howstheweather.domain.RainState
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
@@ -79,14 +81,30 @@ import kotlin.math.max
 
 private const val NOTABLE_RAIN_CHANCE_PERCENT = 30
 private const val OUTLOOK_PERIOD_COUNT = 4
+private val RAINING_STATES = setOf(RainState.LIGHT, RainState.MODERATE, RainState.HEAVY, RainState.EXTREME)
 
 @Composable
-fun ForecastScreen(state: HomeUiState, modifier: Modifier = Modifier) {
+fun ForecastScreen(
+    state: HomeUiState,
+    onClothingToleranceChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val zone = remember { ZoneId.of("Asia/Taipei") }
     val now = remember(state.areaForecast, state.weeklyForecast) { Instant.now() }
     val upcomingPeriods = remember(state.areaForecast, now) {
         val periods = state.areaForecast?.periods.orEmpty()
         periods.filter { it.endAt.isAfter(now) }.ifEmpty { periods }
+    }
+    val rainingNow = state.decision.state in RAINING_STATES
+    val clothingAdvice = remember(state.areaForecast, state.weeklyForecast, state.clothingTolerance, now, rainingNow) {
+        ClothingAdvisor.advise(
+            forecast = state.areaForecast,
+            weekly = state.weeklyForecast,
+            tolerance = state.clothingTolerance,
+            now = now,
+            zone = zone,
+            rainingNow = rainingNow,
+        )
     }
 
     Column(
@@ -105,6 +123,16 @@ fun ForecastScreen(state: HomeUiState, modifier: Modifier = Modifier) {
                 windSpeedMetersPerSecond = wind?.windSpeedMetersPerSecond,
                 windDirectionDegrees = wind?.windDirectionDegrees?.takeUnless { wind.windDirectionVariable },
             )
+        }
+
+        if (clothingAdvice != null) {
+            ForecastSection(title = "怎麼穿", subtitle = "接下來 12 小時") {
+                ClothingAdviceCard(
+                    advice = clothingAdvice,
+                    tolerance = state.clothingTolerance,
+                    onToleranceChange = onClothingToleranceChange,
+                )
+            }
         }
 
         ForecastSection(title = "逐時預報", subtitle = "每 3 小時") {

@@ -26,6 +26,9 @@ class CwaAreaForecastParserTest {
         assertEquals(32, forecast.periods.single().maximumTemperatureCelsius)
         assertEquals("短暫陣雨", forecast.periods.single().weatherDescription)
         assertEquals(74, forecast.periods.single().relativeHumidityPercent)
+        assertEquals(33, forecast.periods.single().minimumApparentTemperatureCelsius)
+        assertEquals(36, forecast.periods.single().maximumApparentTemperatureCelsius)
+        assertEquals(3, forecast.periods.single().windSpeedMetersPerSecond)
     }
 
     @Test fun `parses native weekly day and night values without inventing hourly detail`() {
@@ -43,6 +46,9 @@ class CwaAreaForecastParserTest {
         assertEquals(listOf(26, 25), forecast.periods.map { it.minimumTemperatureCelsius })
         assertEquals(listOf(34, 29), forecast.periods.map { it.maximumTemperatureCelsius })
         assertEquals(listOf(70, 84), forecast.periods.map { it.relativeHumidityPercent })
+        assertEquals(listOf(28, 26), forecast.periods.map { it.minimumApparentTemperatureCelsius })
+        assertEquals(listOf(38, 31), forecast.periods.map { it.maximumApparentTemperatureCelsius })
+        assertEquals(listOf(9, null), forecast.periods.map { it.uvIndex })
     }
 
     @Test fun `exposes county locator coordinates without forecast interpolation`() {
@@ -83,6 +89,20 @@ class CwaAreaForecastParserTest {
                         {"DataTime":"2026-07-14T18:00:00+08:00","ElementValue":[{"RelativeHumidity":"70"}]},
                         {"DataTime":"2026-07-14T19:00:00+08:00","ElementValue":[{"RelativeHumidity":"74"}]},
                         {"DataTime":"2026-07-14T20:00:00+08:00","ElementValue":[{"RelativeHumidity":"78"}]}
+                      ]
+                    },
+                    {
+                      "ElementName": "體感溫度",
+                      "Time": [
+                        {"DataTime":"2026-07-14T18:00:00+08:00","ElementValue":[{"ApparentTemperature":"36"}]},
+                        {"DataTime":"2026-07-14T19:00:00+08:00","ElementValue":[{"ApparentTemperature":"35"}]},
+                        {"DataTime":"2026-07-14T20:00:00+08:00","ElementValue":[{"ApparentTemperature":"33"}]}
+                      ]
+                    },
+                    {
+                      "ElementName": "風速",
+                      "Time": [
+                        {"DataTime":"2026-07-14T18:00:00+08:00","ElementValue":[{"WindSpeed":"3","BeaufortScale":"2"}]}
                       ]
                     },
                     {
@@ -137,6 +157,17 @@ class CwaAreaForecastParserTest {
                   {"ElementName":"平均相對濕度","Time":[
                     {"StartTime":"2026-07-14T06:00:00+08:00","EndTime":"2026-07-14T18:00:00+08:00","ElementValue":{"RelativeHumidity":"70"}},
                     {"StartTime":"2026-07-14T18:00:00+08:00","EndTime":"2026-07-15T06:00:00+08:00","ElementValue":{"RelativeHumidity":"84"}}
+                  ]},
+                  {"ElementName":"最低體感溫度","Time":[
+                    {"StartTime":"2026-07-14T06:00:00+08:00","EndTime":"2026-07-14T18:00:00+08:00","ElementValue":{"MinApparentTemperature":"28"}},
+                    {"StartTime":"2026-07-14T18:00:00+08:00","EndTime":"2026-07-15T06:00:00+08:00","ElementValue":{"MinApparentTemperature":"26"}}
+                  ]},
+                  {"ElementName":"最高體感溫度","Time":[
+                    {"StartTime":"2026-07-14T06:00:00+08:00","EndTime":"2026-07-14T18:00:00+08:00","ElementValue":{"MaxApparentTemperature":"38"}},
+                    {"StartTime":"2026-07-14T18:00:00+08:00","EndTime":"2026-07-15T06:00:00+08:00","ElementValue":{"MaxApparentTemperature":"31"}}
+                  ]},
+                  {"ElementName":"紫外線指數","Time":[
+                    {"StartTime":"2026-07-14T06:00:00+08:00","EndTime":"2026-07-14T18:00:00+08:00","ElementValue":{"UVIndex":"9","UVExposureLevel":"過量級"}}
                   ]},
                   {"ElementName":"天氣現象","Time":[
                     {"StartTime":"2026-07-14T06:00:00+08:00","EndTime":"2026-07-14T18:00:00+08:00","ElementValue":{"Weather":"多雲短暫陣雨","WeatherCode":"08"}},
