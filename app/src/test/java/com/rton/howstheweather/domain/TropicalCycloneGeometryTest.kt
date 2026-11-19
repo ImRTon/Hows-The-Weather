@@ -1,6 +1,10 @@
 package com.rton.howstheweather.domain
 
+import java.time.Duration
+import java.time.Instant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TropicalCycloneGeometryTest {
@@ -52,5 +56,37 @@ class TropicalCycloneGeometryTest {
         assertEquals(8, outline.size)
         assertEquals(310.0, greatCircleDistanceKm(center, outline[1]), .5)
         assertEquals(240.0, greatCircleDistanceKm(center, outline[5]), .5)
+    }
+
+    @Test
+    fun activeCheckFiltersStaleAnalysisFixes() {
+        val fixTime = Instant.parse("2026-11-11T06:00:00Z")
+        val cyclone = TropicalCyclone(
+            year = 2026,
+            englishName = "CEMPAKA",
+            cwaName = "查帕卡",
+            typhoonNumber = 31,
+            depressionNumber = 35,
+            track = listOf(
+                CycloneFix(
+                    time = fixTime,
+                    center = GeoPoint(28.9, 149.9),
+                    maxWindMetersPerSecond = 30f,
+                    maxGustMetersPerSecond = 38f,
+                    pressureHectopascals = 975f,
+                    movingSpeedKmPerHour = 54f,
+                    movingDirection = "ENE",
+                    movingPrediction = null,
+                    galeRadius = null,
+                    stormRadius = null,
+                ),
+            ),
+            forecast = emptyList(),
+            sourceId = "W-C0034-005",
+        )
+
+        assertTrue(cyclone.isActiveAt(fixTime.plus(Duration.ofHours(24))))
+        assertFalse(cyclone.isActiveAt(fixTime.plus(Duration.ofHours(24).plusSeconds(1))))
+        assertFalse(cyclone.isActiveAt(Instant.parse("2026-11-19T11:00:00Z")))
     }
 }

@@ -166,6 +166,7 @@ class CwaWeatherDataSource(
 
     override suspend fun loadTropicalCyclones(): List<TropicalCyclone> =
         fetchRestJson(CwaTropicalCycloneParser.DATASET_ID, TROPICAL_CYCLONE_MAX_AGE, tropicalCycloneParser::parse)
+            .filter { it.isActiveAt(clock.instant()) }
 
     override suspend fun loadRegionalRadar(): WeatherGrid =
         fetchRadarFrame(LOCAL_RADAR_DATASET_ID, RADAR_LOCAL_SAMPLE_SIZE)

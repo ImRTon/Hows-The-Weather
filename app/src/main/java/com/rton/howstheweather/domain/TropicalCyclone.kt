@@ -1,5 +1,6 @@
 package com.rton.howstheweather.domain
 
+import java.time.Duration
 import java.time.Instant
 import kotlin.math.PI
 import kotlin.math.asin
@@ -25,12 +26,24 @@ data class TropicalCyclone(
 
     val latest: CycloneFix get() = track.last()
 
+    /**
+     * Whether this cyclone still has a recent analysis fix at [now]. CWA's
+     * `W-C0034-005` feed can retain dissipated systems for days after the last
+     * fix; dropping entries older than [maxAge] keeps stale tracks off the map.
+     */
+    fun isActiveAt(now: Instant, maxAge: Duration = DEFAULT_MAX_ANALYSIS_AGE): Boolean =
+        !latest.time.isBefore(now.minus(maxAge))
+
     val displayName: String
         get() {
             val name = cwaName.ifBlank { englishName }
             val kind = if (typhoonNumber != null) "颱風" else "熱帶性低氣壓"
             return if (name.isBlank()) kind else "$kind $name"
         }
+
+    companion object {
+        val DEFAULT_MAX_ANALYSIS_AGE: Duration = Duration.ofHours(24)
+    }
 }
 
 data class CycloneFix(

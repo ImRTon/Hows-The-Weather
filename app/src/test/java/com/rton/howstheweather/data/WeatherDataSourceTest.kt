@@ -5,7 +5,9 @@ import com.rton.howstheweather.domain.GeoBounds
 import com.rton.howstheweather.domain.WeatherGrid
 import com.rton.howstheweather.domain.WeatherUnit
 import com.rton.howstheweather.domain.WindProvenance
+import java.time.Clock
 import java.time.Instant
+import java.time.ZoneOffset
 import kotlinx.coroutines.test.runTest
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -120,6 +122,37 @@ class WeatherDataSourceTest {
         } finally {
             cacheDirectory.deleteRecursively()
         }
+    }
+
+    @Test fun `loadTropicalCyclones filters stale cyclones while keeping active ones`() = runTest {
+        val body = """
+            {"success":"true","records":{"TropicalCyclones":{"TropicalCyclone":[
+              {"Year":"2026","TyphoonName":"STALE","CwaTyphoonName":"舊颱風","CwaTyNo":"31",
+               "AnalysisData":{"Fix":{"DateTime":"2026-11-11T14:00:00+08:00","CoordinateLongitude":"149.9","CoordinateLatitude":"28.9"}}},
+              {"Year":"2026","TyphoonName":"ACTIVE","CwaTyphoonName":"新颱風","CwaTyNo":"32",
+               "AnalysisData":{"Fix":{"DateTime":"2026-11-19T14:00:00+08:00","CoordinateLongitude":"130.1","CoordinateLatitude":"18.1"}}}
+            ]}}}
+        """.trimIndent()
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+        val source = CwaWeatherDataSource(
+            apiKey = "test-key",
+            client = client,
+            clock = Clock.fixed(Instant.parse("2026-11-19T11:00:00Z"), ZoneOffset.UTC),
+        )
+
+        val cyclones = source.loadTropicalCyclones()
+
+        assertEquals(listOf("ACTIVE"), cyclones.map { it.englishName })
     }
 
     private companion object {
