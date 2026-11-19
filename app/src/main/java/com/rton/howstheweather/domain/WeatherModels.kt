@@ -299,7 +299,7 @@ object RadarCoverageSelector {
 }
 enum class PanelAnchor { DECISION, BALANCED, MAP }
 enum class ThemePreference { SYSTEM, LIGHT, DARK }
-enum class AppDestination { NOW, FORECAST, PRECIPITATION }
+enum class AppDestination { NOW, SUMMARY, FORECAST, PRECIPITATION }
 enum class RainState { DRY, LIGHT, MODERATE, HEAVY, EXTREME, UNAVAILABLE }
 
 data class TargetLocation(

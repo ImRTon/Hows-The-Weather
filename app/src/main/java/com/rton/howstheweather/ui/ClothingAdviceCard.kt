@@ -92,33 +92,16 @@ internal fun ClothingAdviceCard(
         shape = RoundedCornerShape(20.dp),
         color = colors.surfaceVariant,
     ) {
-        Column(Modifier.padding(top = 18.dp, bottom = 8.dp)) {
-            Column(
-                Modifier
-                    .padding(horizontal = 18.dp)
-                    .semantics(mergeDescendants = true) { },
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                AnimatedContent(
-                    targetState = clothingHeadline(advice),
-                    transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(120)) },
-                    label = "clothingHeadline",
-                ) { headline ->
-                    Text(
-                        headline,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.onSurface,
-                    )
-                }
-                Text(
-                    feelsLikeLine(advice, tolerance),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-            }
+        Column(Modifier.padding(top = 16.dp, bottom = 8.dp)) {
+            Text(
+                feelsLikeLine(advice, tolerance),
+                modifier = Modifier.padding(horizontal = 18.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = colors.onSurfaceVariant,
+            )
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -167,12 +150,14 @@ internal fun ClothingAdviceCard(
                 onToleranceChange = onToleranceChange,
                 modifier = Modifier.padding(horizontal = 18.dp),
             )
-            Text(
-                sourceLine(advice),
-                modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 6.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant.copy(alpha = .8f),
-            )
+            if (advice.usedEstimatedFeelsLike) {
+                Text(
+                    "部分體感依溫濕度估算",
+                    modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant.copy(alpha = .8f),
+                )
+            }
         }
     }
 }
@@ -371,16 +356,6 @@ internal fun toleranceLabel(value: Int): String = when {
     else -> "怕熱 $value 級 · 少穿一點"
 }
 
-internal fun clothingHeadline(advice: ClothingAdvice): String = buildString {
-    append(topLabel(advice.top))
-    when (advice.outer) {
-        OuterWear.NONE -> Unit
-        OuterWear.CARRY_LIGHT -> append("，早晚帶件薄外套")
-        else -> append("＋").append(outerLabel(advice.outer))
-    }
-    append("，").append(bottomLabel(advice.bottom))
-}
-
 private fun feelsLikeLine(advice: ClothingAdvice, tolerance: Int): String = buildString {
     append("體感 ")
     if (advice.feelsLikeMinimum == advice.feelsLikeMaximum) {
@@ -390,11 +365,6 @@ private fun feelsLikeLine(advice: ClothingAdvice, tolerance: Int): String = buil
     }
     advice.maxRainChancePercent?.let { append(" · 降雨 ").append(it).append("%") }
     if (tolerance != 0) append(" · 已依偏好 ").append(if (tolerance > 0) "+" else "−").append(abs(tolerance)).append("°")
-}
-
-private fun sourceLine(advice: ClothingAdvice): String = buildString {
-    append(advice.areaName).append(" · 氣象署鄉鎮預報")
-    if (advice.usedEstimatedFeelsLike) append(" · 部分體感依溫濕度估算")
 }
 
 internal fun topLabel(top: TopWear): String = when (top) {

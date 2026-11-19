@@ -84,17 +84,21 @@ private const val OUTLOOK_PERIOD_COUNT = 4
 private val RAINING_STATES = setOf(RainState.LIGHT, RainState.MODERATE, RainState.HEAVY, RainState.EXTREME)
 
 @Composable
-fun ForecastScreen(
+private fun rememberUpcomingPeriods(areaForecast: AreaForecast?, now: Instant): List<AreaForecastPeriod> =
+    remember(areaForecast, now) {
+        val periods = areaForecast?.periods.orEmpty()
+        periods.filter { it.endAt.isAfter(now) }.ifEmpty { periods }
+    }
+
+@Composable
+fun SummaryScreen(
     state: HomeUiState,
     onClothingToleranceChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val zone = remember { ZoneId.of("Asia/Taipei") }
     val now = remember(state.areaForecast, state.weeklyForecast) { Instant.now() }
-    val upcomingPeriods = remember(state.areaForecast, now) {
-        val periods = state.areaForecast?.periods.orEmpty()
-        periods.filter { it.endAt.isAfter(now) }.ifEmpty { periods }
-    }
+    val upcomingPeriods = rememberUpcomingPeriods(state.areaForecast, now)
     val rainingNow = state.decision.state in RAINING_STATES
     val clothingAdvice = remember(state.areaForecast, state.weeklyForecast, state.clothingTolerance, now, rainingNow) {
         ClothingAdvisor.advise(
@@ -113,15 +117,21 @@ fun ForecastScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        if (state.areaForecast != null && upcomingPeriods.isNotEmpty()) {
-            val wind = state.currentWeather
-            ForecastOverviewCard(
-                forecast = state.areaForecast,
-                upcomingPeriods = upcomingPeriods,
-                now = now,
-                zone = zone,
-                windSpeedMetersPerSecond = wind?.windSpeedMetersPerSecond,
-                windDirectionDegrees = wind?.windDirectionDegrees?.takeUnless { wind.windDirectionVariable },
+        when {
+            state.areaForecast != null && upcomingPeriods.isNotEmpty() -> {
+                val wind = state.currentWeather
+                ForecastOverviewCard(
+                    forecast = state.areaForecast,
+                    upcomingPeriods = upcomingPeriods,
+                    now = now,
+                    zone = zone,
+                    windSpeedMetersPerSecond = wind?.windSpeedMetersPerSecond,
+                    windDirectionDegrees = wind?.windDirectionDegrees?.takeUnless { wind.windDirectionVariable },
+                )
+            }
+            state.areaForecastLoading -> LoadingForecastCard("正在取得天氣摘要")
+            else -> EmptyForecastCard(
+                state.areaForecastUnavailableReason ?: "此位置暫無天氣摘要",
             )
         }
 
@@ -135,6 +145,33 @@ fun ForecastScreen(
             }
         }
 
+        ForecastSection(title = "空氣品質", subtitle = "鄰近測站即時觀測") {
+            AirQualityCard(
+                observation = state.airQuality,
+                loading = state.airQualityLoading,
+                unavailableReason = state.airQualityUnavailableReason,
+                zone = zone,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+@Composable
+fun ForecastScreen(
+    state: HomeUiState,
+    modifier: Modifier = Modifier,
+) {
+    val zone = remember { ZoneId.of("Asia/Taipei") }
+    val now = remember(state.areaForecast, state.weeklyForecast) { Instant.now() }
+    val upcomingPeriods = rememberUpcomingPeriods(state.areaForecast, now)
+
+    Column(
+        modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
         ForecastSection(title = "逐時預報", subtitle = "每 3 小時") {
             when {
                 state.areaForecastLoading -> LoadingForecastCard("正在取得近期預報")
@@ -153,15 +190,6 @@ fun ForecastScreen(
                 )
                 else -> WeeklyForecastList(state.weeklyForecast.periods, now, zone)
             }
-        }
-
-        ForecastSection(title = "空氣品質", subtitle = "鄰近測站即時觀測") {
-            AirQualityCard(
-                observation = state.airQuality,
-                loading = state.airQualityLoading,
-                unavailableReason = state.airQualityUnavailableReason,
-                zone = zone,
-            )
         }
         Spacer(Modifier.height(4.dp))
     }

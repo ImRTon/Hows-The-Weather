@@ -141,9 +141,13 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         when (state.destination) {
-            AppDestination.FORECAST -> ForecastScreen(
+            AppDestination.SUMMARY -> SummaryScreen(
                 state = state,
                 onClothingToleranceChange = viewModel::setClothingTolerance,
+                modifier = Modifier.padding(padding).fillMaxSize(),
+            )
+            AppDestination.FORECAST -> ForecastScreen(
+                state = state,
                 modifier = Modifier.padding(padding).fillMaxSize(),
             )
             AppDestination.NOW,
@@ -164,6 +168,7 @@ private fun WeatherNavigationBar(
     NavigationBar {
         listOf(
             Triple(AppDestination.NOW, Icons.Default.NearMe, "即時"),
+            Triple(AppDestination.SUMMARY, Icons.Default.WbSunny, "摘要"),
             Triple(AppDestination.FORECAST, Icons.Default.CalendarMonth, "預報"),
             Triple(AppDestination.PRECIPITATION, Icons.Default.Map, "降水"),
         ).forEach { (item, icon, label) ->
@@ -182,6 +187,7 @@ private fun WeatherNavigationBar(
 private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
     val formatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()) }
     val timeContext = when (state.destination) {
+        AppDestination.SUMMARY -> "天氣概況 · 穿搭 · 空氣品質"
         AppDestination.FORECAST -> "逐 3 小時 · 本週日夜"
         AppDestination.PRECIPITATION -> {
             val startHour = state.quantitativeForecastIndex * 12
@@ -409,6 +415,7 @@ private fun WeatherWorkspace(
                     layout(placeable.width, constraints.maxHeight) { placeable.place(0, top) }
                 }
             AppDestination.PRECIPITATION,
+            AppDestination.SUMMARY,
             AppDestination.FORECAST -> Modifier.fillMaxSize()
         }
 
