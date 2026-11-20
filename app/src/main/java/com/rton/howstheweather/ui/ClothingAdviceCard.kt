@@ -297,7 +297,7 @@ private fun ToleranceControl(
                 )
             },
             track = {
-                ToleranceTrack(fraction = fraction, modifier = Modifier.fillMaxWidth().height(20.dp))
+                ToleranceTrack(modifier = Modifier.fillMaxWidth().height(20.dp))
             },
         )
         Text("怕熱", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
@@ -305,40 +305,27 @@ private fun ToleranceControl(
 }
 
 @Composable
-private fun ToleranceTrack(fraction: Float, modifier: Modifier = Modifier) {
-    val tickColor = MaterialTheme.colorScheme.onSurface
+private fun ToleranceTrack(modifier: Modifier = Modifier) {
+    // Ticks are punched out of one continuous track so nothing sits on top of it.
+    val cutout = MaterialTheme.colorScheme.surfaceVariant
     val stepCount = ClothingAdvisor.TOLERANCE_MAX - ClothingAdvisor.TOLERANCE_MIN
     Canvas(modifier) {
         val height = 6.dp.toPx()
         val top = (size.height - height) / 2f
-        val radius = CornerRadius(height / 2f)
         drawRoundRect(
             brush = Brush.horizontalGradient(listOf(ColdEnd, NeutralMid, WarmEnd)),
             topLeft = Offset(0f, top),
             size = androidx.compose.ui.geometry.Size(size.width, height),
-            cornerRadius = radius,
-            alpha = .3f,
+            cornerRadius = CornerRadius(height / 2f),
+            alpha = .55f,
         )
-        // Fill from the neutral centre toward the thumb, so the offset reads as a direction.
-        val centre = size.width / 2f
-        val thumbX = fraction * size.width
-        val left = minOf(centre, thumbX)
-        val right = maxOf(centre, thumbX)
-        if (right - left > 0.5f) {
-            drawRoundRect(
-                brush = Brush.horizontalGradient(listOf(ColdEnd, NeutralMid, WarmEnd), startX = 0f, endX = size.width),
-                topLeft = Offset(left, top),
-                size = androidx.compose.ui.geometry.Size(right - left, height),
-                cornerRadius = radius,
-            )
-        }
-        for (index in 0..stepCount) {
+        for (index in 1 until stepCount) {
             val x = size.width * index / stepCount
             val isCentre = index == stepCount / 2
             drawCircle(
-                color = tickColor.copy(alpha = if (isCentre) .7f else .28f),
-                radius = if (isCentre) 3.dp.toPx() else 1.6.dp.toPx(),
-                center = Offset(x.coerceIn(height / 2f, size.width - height / 2f), size.height / 2f),
+                color = cutout,
+                radius = if (isCentre) 2.2.dp.toPx() else 1.2.dp.toPx(),
+                center = Offset(x, size.height / 2f),
             )
         }
     }
@@ -364,7 +351,7 @@ private fun feelsLikeLine(advice: ClothingAdvice, tolerance: Int): String = buil
         append(advice.feelsLikeMinimum).append("–").append(advice.feelsLikeMaximum).append("°C")
     }
     advice.maxRainChancePercent?.let { append(" · 降雨 ").append(it).append("%") }
-    if (tolerance != 0) append(" · 已依偏好 ").append(if (tolerance > 0) "+" else "−").append(abs(tolerance)).append("°")
+    if (tolerance != 0) append(" · 已依偏好").append(if (tolerance > 0) "少穿 " else "多穿 ").append(abs(tolerance)).append(" 級")
 }
 
 internal fun topLabel(top: TopWear): String = when (top) {

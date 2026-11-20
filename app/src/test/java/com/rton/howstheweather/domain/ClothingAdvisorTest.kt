@@ -33,14 +33,40 @@ class ClothingAdvisorTest {
         assertEquals(BottomWear.TROUSERS, advice.bottom)
     }
 
+    @Test fun `dry cool day calibrated as light long sleeves with a light jacket`() {
+        // 2026-11-20 Taipei: CWA feels-like 15–16 °C, humidity mid 60s, dry.
+        val now = Instant.parse("2026-11-20T00:00:00Z")
+        val advice = advise(now, period(now, 0, 15, 16, rain = 10, humidity = 66), period(now, 3, 15, 16, humidity = 65))!!
+
+        assertFalse(advice.dampChill)
+        assertEquals(TopWear.LIGHT_LONG_SLEEVE, advice.top)
+        assertEquals(OuterWear.LIGHT, advice.outer)
+        assertEquals(BottomWear.TROUSERS, advice.bottom)
+    }
+
     @Test fun `tolerance shifts tiers in both directions`() {
         val now = Instant.parse("2026-11-19T00:00:00Z")
-        val period = period(now, 0, 19, 21, humidity = 70)
+        val period = period(now, 0, 17, 19, humidity = 70)
 
         assertEquals(OuterWear.LIGHT, advise(now, period)!!.outer)
-        assertEquals(OuterWear.NONE, advise(now, period, tolerance = 3)!!.outer)
-        assertEquals(OuterWear.REGULAR, advise(now, period, tolerance = -2)!!.outer)
-        assertEquals(TopWear.LIGHT_LONG_SLEEVE, advise(now, period, tolerance = -4)!!.top)
+        assertEquals(TopWear.SHORT_SLEEVE, advise(now, period)!!.top)
+        assertEquals(OuterWear.CARRY_LIGHT, advise(now, period, tolerance = 3)!!.outer)
+        assertEquals(OuterWear.REGULAR, advise(now, period, tolerance = -3)!!.outer)
+        assertEquals(TopWear.WARM_LAYER, advise(now, period, tolerance = -4)!!.top)
+    }
+
+    @Test fun `one tolerance step weighs more in the cold than in the warmth`() {
+        assertEquals(1f, ClothingAdvisor.toleranceGain(26f), 0f)
+        assertEquals(1f, ClothingAdvisor.toleranceGain(22f), 0f)
+        assertEquals(1.5f, ClothingAdvisor.toleranceGain(16f), 1e-4f)
+        assertEquals(2f, ClothingAdvisor.toleranceGain(10f), 0f)
+        assertEquals(2f, ClothingAdvisor.toleranceGain(4f), 0f)
+
+        val warmShift = ClothingAdvisor.personalized(26f, -2) - 26f
+        val coldShift = ClothingAdvisor.personalized(10f, -2) - 10f
+        assertEquals(-2f, warmShift, 0f)
+        assertEquals(-4f, coldShift, 0f)
+        assertEquals(16f, ClothingAdvisor.personalized(16f, 0), 0f)
     }
 
     @Test fun `tolerance is clamped to the slider range`() {
@@ -87,7 +113,12 @@ class ClothingAdvisorTest {
 
         val cold = advise(now, period(now, 0, 8, 11))!!
         assertEquals(HatAdvice.BEANIE, cold.hat)
-        assertEquals(OuterWear.DOWN, cold.outer)
+        assertEquals(OuterWear.HEAVY, cold.outer)
+
+        val freezing = advise(now, period(now, 0, 4, 6))!!
+        assertEquals(OuterWear.DOWN, freezing.outer)
+        assertEquals(TopWear.THERMAL_LAYER, freezing.top)
+        assertEquals(BottomWear.WARM_TROUSERS, freezing.bottom)
     }
 
     @Test fun `uv is ignored at night`() {

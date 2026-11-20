@@ -40,8 +40,10 @@ data class ClothingAdvice(
  * Maps official feels-like temperatures to Taiwanese everyday clothing tiers.
  *
  * Thresholds were calibrated against personal reports: CWA feels-like 22–28 °C
- * was comfortable in short sleeves, and about 16–17 °C in drizzle needed a light
- * long-sleeve top with a regular jacket. The 18–22 °C band has no report yet.
+ * was comfortable in short sleeves; about 16–17 °C in drizzle needed a light
+ * long-sleeve top with a regular jacket; and a dry 15–16 °C day was fine in a
+ * light long-sleeve top with a light jacket. The 18–22 °C band and everything
+ * below 15 °C have no report yet.
  */
 object ClothingAdvisor {
     const val TOLERANCE_MIN = -4
@@ -57,6 +59,18 @@ object ClothingAdvisor {
     private const val WINDY_METERS_PER_SECOND = 8
     private const val FALLBACK_HUMIDITY = 75
     private const val FALLBACK_WIND = 2
+    private const val BEANIE_BELOW = 10f
+
+    /** Personal sensitivity grows in the cold: one slider step is 1 °C at ≥22 °C and 2 °C at ≤10 °C. */
+    private const val TOLERANCE_LINEAR_ABOVE = 22f
+    private const val TOLERANCE_DOUBLED_BELOW = 10f
+
+    internal fun toleranceGain(feelsLike: Float): Float {
+        val coldness = (TOLERANCE_LINEAR_ABOVE - feelsLike) / (TOLERANCE_LINEAR_ABOVE - TOLERANCE_DOUBLED_BELOW)
+        return 1f + coldness.coerceIn(0f, 1f)
+    }
+
+    internal fun personalized(feelsLike: Float, steps: Int): Float = feelsLike + steps * toleranceGain(feelsLike)
 
     fun advise(
         forecast: AreaForecast?,
@@ -98,9 +112,9 @@ object ClothingAdvisor {
         val dampChill = feelsMinimum < DAMP_CHILL_BELOW &&
             ((maxHumidity ?: 0) >= DAMP_CHILL_HUMIDITY || rainLikely)
         val penalty = if (dampChill) DAMP_CHILL_PENALTY else 0f
-        val offset = tolerance.coerceIn(TOLERANCE_MIN, TOLERANCE_MAX).toFloat()
-        val effectiveMinimum = feelsMinimum + offset - penalty
-        val effectiveMaximum = feelsMaximum + offset - penalty
+        val steps = tolerance.coerceIn(TOLERANCE_MIN, TOLERANCE_MAX)
+        val effectiveMinimum = personalized(feelsMinimum - penalty, steps)
+        val effectiveMaximum = personalized(feelsMaximum - penalty, steps)
         val effectiveMiddle = (effectiveMinimum + effectiveMaximum) / 2f
 
         val outer = outerFor(effectiveMinimum)
@@ -108,7 +122,7 @@ object ClothingAdvisor {
         val uv = if (daylight) uvFor(weekly, now, windowEnd) else null
         val sunny = uv != null && uv >= SUN_HAT_UV && !rainLikely
         val hat = when {
-            effectiveMinimum < 12f -> HatAdvice.BEANIE
+            effectiveMinimum < BEANIE_BELOW -> HatAdvice.BEANIE
             sunny && (maxWind ?: 0) >= WINDY_METERS_PER_SECOND -> HatAdvice.SUN_WINDY
             sunny -> HatAdvice.SUN
             else -> HatAdvice.NONE
@@ -143,24 +157,25 @@ object ClothingAdvisor {
 
     internal fun topFor(middle: Float): TopWear = when {
         middle >= 18f -> TopWear.SHORT_SLEEVE
-        middle >= 14f -> TopWear.LIGHT_LONG_SLEEVE
-        middle >= 10f -> TopWear.WARM_LAYER
+        middle >= 13f -> TopWear.LIGHT_LONG_SLEEVE
+        middle >= 9f -> TopWear.WARM_LAYER
         else -> TopWear.THERMAL_LAYER
     }
 
+    // Bands widen toward the cold: 2 °C apart near short-sleeve weather, 4 °C apart below 15 °C.
     internal fun outerFor(minimum: Float): OuterWear = when {
         minimum >= 22f -> OuterWear.NONE
         minimum >= 20f -> OuterWear.CARRY_LIGHT
-        minimum >= 18f -> OuterWear.LIGHT
-        minimum >= 14f -> OuterWear.REGULAR
-        minimum >= 10f -> OuterWear.HEAVY
+        minimum >= 15f -> OuterWear.LIGHT
+        minimum >= 11f -> OuterWear.REGULAR
+        minimum >= 7f -> OuterWear.HEAVY
         else -> OuterWear.DOWN
     }
 
     internal fun bottomFor(middle: Float): BottomWear = when {
         middle >= 26f -> BottomWear.SHORTS
         middle >= 22f -> BottomWear.SHORTS_OR_TROUSERS
-        middle >= 12f -> BottomWear.TROUSERS
+        middle >= 10f -> BottomWear.TROUSERS
         else -> BottomWear.WARM_TROUSERS
     }
 
