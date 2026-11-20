@@ -17,9 +17,9 @@ data class CwaQuantitativeForecastMetadata(
 /**
  * Converts the four public 12-hour rainfall charts into regular numerical grids.
  *
- * Only pixels inside the map frame can contribute to a sample. Within that
- * frame, colors matching CWA's rainfall legend become amounts, and dark
- * coastlines or annotations can be filled from nearby rainfall pixels.
+ * Only map pixels can contribute to a sample. Within the map frame, colors
+ * matching CWA's rainfall legend become amounts, and dark coastlines or
+ * annotations can be filled from nearby rainfall pixels.
  * The projection is calibrated to the main Taiwan panel.
  */
 class CwaQuantitativeForecastImageParser {
@@ -46,8 +46,14 @@ class CwaQuantitativeForecastImageParser {
         require(endHour in 12..48 && endHour % 12 == 0)
         val xScale = imageWidth / REFERENCE_IMAGE_WIDTH
         val yScale = imageHeight / REFERENCE_IMAGE_HEIGHT
-        val mapColumns = ceil(MAP_LEFT * xScale).toInt()..floor(MAP_RIGHT * xScale).toInt()
-        val mapRows = ceil(MAP_TOP * yScale).toInt()..floor(MAP_BOTTOM * yScale).toInt()
+        val map = ChartRegion(
+            ceil(MAP_LEFT * xScale).toInt()..floor(MAP_RIGHT * xScale).toInt(),
+            ceil(MAP_TOP * yScale).toInt()..floor(MAP_BOTTOM * yScale).toInt(),
+        )
+        val legend = ChartRegion(
+            floor(LEGEND_LEFT * xScale).toInt()..ceil(LEGEND_RIGHT * xScale).toInt(),
+            floor(LEGEND_TOP * yScale).toInt()..ceil(LEGEND_BOTTOM * yScale).toInt(),
+        )
         val values = FloatArray(OUTPUT_WIDTH * OUTPUT_HEIGHT)
         for (y in 0 until OUTPUT_HEIGHT) {
             val latitude = GRID_BOUNDS.north -
@@ -58,7 +64,7 @@ class CwaQuantitativeForecastImageParser {
                 val (referenceX, referenceY) = sourcePixel(longitude, latitude)
                 values[y * OUTPUT_WIDTH + x] = decodeSample(
                     (referenceX * xScale).roundToInt(), (referenceY * yScale).roundToInt(),
-                    imageWidth, argbPixels, mapColumns, mapRows,
+                    imageWidth, argbPixels, map, legend,
                 )
             }
         }
@@ -105,10 +111,10 @@ class CwaQuantitativeForecastImageParser {
         centerY: Int,
         width: Int,
         pixels: IntArray,
-        mapColumns: IntRange,
-        mapRows: IntRange,
+        map: ChartRegion,
+        legend: ChartRegion? = null,
     ): Float {
-        if (centerX !in mapColumns || centerY !in mapRows) return Float.NaN
+        if (!map.contains(centerX, centerY) || legend?.contains(centerX, centerY) == true) return Float.NaN
         val centerPixel = pixels[centerY * width + centerX]
         decodeRain(centerPixel)?.let { return it }
         // Dry land (white) and the ocean background (light blue) indicate 0 mm.
@@ -120,7 +126,7 @@ class CwaQuantitativeForecastImageParser {
                 if (kotlin.math.abs(dx) != radius && kotlin.math.abs(dy) != radius) continue
                 val x = centerX + dx
                 val y = centerY + dy
-                if (x !in mapColumns || y !in mapRows) continue
+                if (!map.contains(x, y) || legend?.contains(x, y) == true) continue
                 decodeRain(pixels[y * width + x])?.let { value ->
                     total += value
                     count += 1
@@ -171,6 +177,10 @@ class CwaQuantitativeForecastImageParser {
         optString(it).takeIf(String::isNotBlank)
     } ?: error("缺少定量降水欄位：${keys.joinToString()}")
 
+    internal class ChartRegion(private val columns: IntRange, private val rows: IntRange) {
+        fun contains(x: Int, y: Int): Boolean = x in columns && y in rows
+    }
+
     private companion object {
         const val OUTPUT_WIDTH = 160
         const val OUTPUT_HEIGHT = 212
@@ -181,6 +191,11 @@ class CwaQuantitativeForecastImageParser {
         const val MAP_TOP = 154
         const val MAP_RIGHT = 1229
         const val MAP_BOTTOM = 1487
+        // The in-frame color bar uses the same colors as the precipitation field.
+        const val LEGEND_LEFT = 1157
+        const val LEGEND_TOP = 689
+        const val LEGEND_RIGHT = 1196
+        const val LEGEND_BOTTOM = 1406
         const val MIN_ALPHA = 240
         const val MAX_CHANNEL_TOLERANCE = 2
         const val MAX_INPAINT_RADIUS = 3

@@ -252,7 +252,7 @@ class WeatherSnapshotCache(
         // Taiwan now uses the documented transverse Mercator projection.
         // Never restore clouds made by the earlier linear latitude/longitude path.
         const val OLDEST_COMPATIBLE_VERSION = 14
-        const val VERSION = 16
+        const val VERSION = 17
         // O-A0001-001 currently contains roughly 900 stations. Keep the bound
         // finite for corrupt-cache protection while allowing a complete
         // official observation set to survive process restarts.

@@ -1,5 +1,6 @@
 package com.rton.howstheweather.data
 
+import com.rton.howstheweather.data.CwaQuantitativeForecastImageParser.ChartRegion
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -45,7 +46,7 @@ class CwaQuantitativeForecastImageParserTest {
         pixels[4] = argb(156, 252, 255) // 1 mm
         pixels[5] = argb(255, 0, 0) // 70 mm
 
-        assertEquals(1f, parser.decodeSample(1, 1, 3, pixels, 0..2, 0..2))
+        assertEquals(1f, parser.decodeSample(1, 1, 3, pixels, ChartRegion(0..2, 0..2)))
     }
 
     @Test
@@ -54,7 +55,7 @@ class CwaQuantitativeForecastImageParserTest {
         pixels[1] = argb(3, 200, 255) // 2 mm
         pixels[5] = argb(3, 99, 255) // 10 mm
 
-        assertEquals(6f, parser.decodeSample(1, 1, 3, pixels, 0..2, 0..2))
+        assertEquals(6f, parser.decodeSample(1, 1, 3, pixels, ChartRegion(0..2, 0..2)))
     }
 
     @Test
@@ -64,7 +65,7 @@ class CwaQuantitativeForecastImageParserTest {
         // 2-px wide black county border surrounded by 10 mm at radius 2 is inpainted:
         val pixels = IntArray(5 * 5) { argb(0, 0, 0) }
         pixels[0] = argb(3, 99, 255)
-        assertEquals(10f, parser.decodeSample(2, 2, 5, pixels, 0..4, 0..4))
+        assertEquals(10f, parser.decodeSample(2, 2, 5, pixels, ChartRegion(0..4, 0..4)))
     }
 
     @Test
@@ -73,11 +74,46 @@ class CwaQuantitativeForecastImageParserTest {
         pixels[2] = argb(192, 192, 192) // Antialiased frame, within the 0.5 mm color tolerance.
         pixels[7] = argb(0, 0, 0)
         pixels[12] = argb(194, 194, 194) // Real 0.5 mm inside the map.
+        val map = ChartRegion(1..3, 1..3)
 
-        assertTrue(parser.decodeSample(2, 0, 5, pixels, 1..3, 1..3).isNaN())
-        assertEquals(0.5f, parser.decodeSample(2, 1, 5, pixels, 1..3, 1..3))
+        assertTrue(parser.decodeSample(2, 0, 5, pixels, map).isNaN())
+        assertEquals(0.5f, parser.decodeSample(2, 1, 5, pixels, map))
         pixels[12] = argb(255, 255, 255)
-        assertEquals(0f, parser.decodeSample(2, 1, 5, pixels, 1..3, 1..3))
+        assertEquals(0f, parser.decodeSample(2, 1, 5, pixels, map))
+    }
+
+    @Test
+    fun `the color bar cannot supply rain to nearby map pixels`() {
+        val pixels = IntArray(25) { argb(255, 255, 255) }
+        pixels[11] = argb(194, 194, 194) // 0.5 mm on the map.
+        pixels[12] = argb(0, 0, 0)
+        pixels[13] = argb(255, 206, 255) // 300 mm on the color bar.
+        val map = ChartRegion(0..4, 0..4)
+        val legend = ChartRegion(3..3, 1..3)
+
+        assertTrue(parser.decodeSample(3, 2, 5, pixels, map, legend).isNaN())
+        assertEquals(0.5f, parser.decodeSample(2, 2, 5, pixels, map, legend))
+    }
+
+    @Test
+    fun `the native color bar is masked without removing the neighboring east grid cell`() {
+        val width = 1245
+        val height = 1500
+        val pixels = IntArray(width * height) { argb(237, 249, 254) }
+        val row = 763 * width
+        pixels[row + 1156] = argb(3, 200, 255)
+        pixels[row + 1162] = argb(255, 206, 255)
+        val grid = parser.toGrid(
+            metadata = CwaQuantitativeForecastMetadata(Instant.EPOCH, "https://example.test/chart.png"),
+            imageWidth = width,
+            imageHeight = height,
+            argbPixels = pixels,
+            sourceId = "F-C0035-015",
+            endHour = 12,
+        )
+
+        assertTrue(grid.valueAt(grid.width - 1, 100).isNaN())
+        assertEquals(2f, grid.valueAt(grid.width - 2, 100))
     }
 
     @Test

@@ -78,10 +78,10 @@ class WeatherSnapshotCacheTest {
         val current = cache.read(issuedAt)!!
         assertArrayEquals(quantitative.values, current.quantitativeForecastFrames.single().values, 0f)
 
-        // Both versions have the same serialized layout and a superseded chart conversion.
+        // These versions have the same serialized layout and a superseded chart conversion.
         val cacheFile = directory.listFiles()!!.single()
         val payload = GZIPInputStream(cacheFile.inputStream()).use { it.readBytes() }
-        for (version in 14..15) {
+        for (version in 14..16) {
             DataOutputStream(GZIPOutputStream(cacheFile.outputStream())).use { output ->
                 output.write(payload, 0, Int.SIZE_BYTES)
                 output.writeInt(version)
