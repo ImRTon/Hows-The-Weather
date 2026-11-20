@@ -34,8 +34,11 @@ class WeatherSnapshotCache(
             // inflater for every byte, which is especially expensive before JIT.
             DataInputStream(BufferedInputStream(GZIPInputStream(BufferedInputStream(file.inputStream())))).use { input ->
                 require(input.readInt() == MAGIC) { "Weather cache magic mismatch" }
-                require(input.readInt() == VERSION) { "Weather cache version mismatch" }
-                readSnapshot(input).takeIf { snapshot ->
+                val version = input.readInt()
+                require(version in OLDEST_COMPATIBLE_VERSION..VERSION) {
+                    "Weather cache version mismatch"
+                }
+                readSnapshot(input, version).takeIf { snapshot ->
                     val age = Duration.between(snapshot.issuedAt, now)
                     age >= MAX_FUTURE_SKEW.negated() && age <= maxAge
                 }
@@ -92,7 +95,7 @@ class WeatherSnapshotCache(
         snapshot.hourlyAccumulationAtTarget?.let(output::writeFloat)
     }
 
-    private fun readSnapshot(input: DataInputStream): WeatherSnapshot {
+    private fun readSnapshot(input: DataInputStream, version: Int): WeatherSnapshot {
         val radar = readGrid(input)
         val radarRegional = if (input.readBoolean()) readGrid(input) else null
         val radarFrames = readList(input) { readGrid(input) }
@@ -124,7 +127,8 @@ class WeatherSnapshotCache(
             radarFrames = radarFrames,
             radarRegionalFrames = radarRegionalFrames,
             rainForecast = forecasts,
-            quantitativeForecastFrames = quantitativeForecasts,
+            // Older quantitative grids used a different chart mask or geographic projection.
+            quantitativeForecastFrames = if (version == VERSION) quantitativeForecasts else emptyList(),
             cloudFrames = clouds,
             cloudRegionalFrames = regionalClouds,
             forecastAtTarget = points,
@@ -247,7 +251,8 @@ class WeatherSnapshotCache(
         const val MAGIC = 0x48545731 // HTW1
         // Taiwan now uses the documented transverse Mercator projection.
         // Never restore clouds made by the earlier linear latitude/longitude path.
-        const val VERSION = 14
+        const val OLDEST_COMPATIBLE_VERSION = 14
+        const val VERSION = 16
         // O-A0001-001 currently contains roughly 900 stations. Keep the bound
         // finite for corrupt-cache protection while allowing a complete
         // official observation set to survive process restarts.

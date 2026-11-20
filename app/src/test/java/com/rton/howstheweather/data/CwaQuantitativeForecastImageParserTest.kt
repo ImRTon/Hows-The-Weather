@@ -3,6 +3,7 @@ package com.rton.howstheweather.data
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CwaQuantitativeForecastImageParserTest {
@@ -44,7 +45,7 @@ class CwaQuantitativeForecastImageParserTest {
         pixels[4] = argb(156, 252, 255) // 1 mm
         pixels[5] = argb(255, 0, 0) // 70 mm
 
-        assertEquals(1f, parser.decodeSample(1, 1, 3, 3, pixels))
+        assertEquals(1f, parser.decodeSample(1, 1, 3, pixels, 0..2, 0..2))
     }
 
     @Test
@@ -53,7 +54,7 @@ class CwaQuantitativeForecastImageParserTest {
         pixels[1] = argb(3, 200, 255) // 2 mm
         pixels[5] = argb(3, 99, 255) // 10 mm
 
-        assertEquals(6f, parser.decodeSample(1, 1, 3, 3, pixels))
+        assertEquals(6f, parser.decodeSample(1, 1, 3, pixels, 0..2, 0..2))
     }
 
     @Test
@@ -63,25 +64,39 @@ class CwaQuantitativeForecastImageParserTest {
         // 2-px wide black county border surrounded by 10 mm at radius 2 is inpainted:
         val pixels = IntArray(5 * 5) { argb(0, 0, 0) }
         pixels[0] = argb(3, 99, 255)
-        assertEquals(10f, parser.decodeSample(2, 2, 5, 5, pixels))
+        assertEquals(10f, parser.decodeSample(2, 2, 5, pixels, 0..4, 0..4))
     }
 
     @Test
-    fun `multi point calibration follows Taiwan chart projection`() {
-        val north = parser.sourcePixel(longitude = 121.536, latitude = 25.298)
-        val center = parser.sourcePixel(longitude = 121.0, latitude = 23.6)
-        val south = parser.sourcePixel(longitude = 120.85, latitude = 21.9)
+    fun `frame pixels cannot become rainfall or contribute to inpainting`() {
+        val pixels = IntArray(25) { argb(255, 255, 255) }
+        pixels[2] = argb(192, 192, 192) // Antialiased frame, within the 0.5 mm color tolerance.
+        pixels[7] = argb(0, 0, 0)
+        pixels[12] = argb(194, 194, 194) // Real 0.5 mm inside the map.
 
-        assertEquals(934.2, north.first, 1.0)
-        assertEquals(202.7, north.second, 1.0)
-        assertEquals(739.8, center.first, 1.0)
-        assertEquals(812.0, center.second, 1.0)
-        assertEquals(688.9, south.first, 1.0)
-        assertEquals(1414.1, south.second, 1.0)
+        assertTrue(parser.decodeSample(2, 0, 5, pixels, 1..3, 1..3).isNaN())
+        assertEquals(0.5f, parser.decodeSample(2, 1, 5, pixels, 1..3, 1..3))
+        pixels[12] = argb(255, 255, 255)
+        assertEquals(0f, parser.decodeSample(2, 1, 5, pixels, 1..3, 1..3))
     }
 
     @Test
-    fun `display grid receives one source cell northward registration`() {
+    fun `map coordinates land near surveyed coastal and inland controls on the chart`() {
+        val fuguijiao = parser.sourcePixel(longitude = 121.53642, latitude = 25.29949)
+        val taichungNantou = parser.sourcePixel(longitude = 120.82889, latitude = 24.07413)
+        val eluanbi = parser.sourcePixel(longitude = 120.85069, latitude = 21.89700)
+
+        // The expected pixels are traced boundaries in the native 1245 × 1500 forecast chart.
+        assertEquals(933.0, fuguijiao.first, 1.5)
+        assertEquals(202.0, fuguijiao.second, 1.5)
+        assertEquals(679.0, taichungNantou.first, 1.5)
+        assertEquals(642.0, taichungNantou.second, 1.5)
+        assertEquals(685.0, eluanbi.first, 1.5)
+        assertEquals(1421.0, eluanbi.second, 1.5)
+    }
+
+    @Test
+    fun `display grid preserves its geographic extent and masks the chart frame`() {
         val grid = parser.toGrid(
             metadata = CwaQuantitativeForecastMetadata(
                 issuedAt = Instant.parse("2026-07-14T03:30:00Z"),
@@ -96,6 +111,9 @@ class CwaQuantitativeForecastImageParserTest {
 
         assertEquals(21.72, grid.bounds.south, .0001)
         assertEquals(25.52, grid.bounds.north, .0001)
+        assertTrue(grid.valueAt(80, 0).isNaN())
+        assertTrue(grid.valueAt(40, grid.height - 1).isNaN())
+        assertEquals(0f, grid.valueAt(0, grid.height - 1))
     }
 
     private fun argb(red: Int, green: Int, blue: Int): Int =

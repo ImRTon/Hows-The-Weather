@@ -7,8 +7,11 @@ import com.rton.howstheweather.domain.WeatherGrid
 import com.rton.howstheweather.domain.WeatherUnit
 import com.rton.howstheweather.domain.WindObservation
 import com.rton.howstheweather.domain.WindProvenance
+import java.io.DataOutputStream
 import java.time.Duration
 import java.time.Instant
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
@@ -58,6 +61,37 @@ class WeatherSnapshotCacheTest {
         cache.write(snapshot(issuedAt))
 
         assertNull(cache.read(issuedAt.plus(Duration.ofMinutes(31))))
+    }
+
+    @Test fun `previous cache versions discard only outdated twelve hour forecasts`() = runTest {
+        val issuedAt = Instant.parse("2026-07-12T01:00:00Z")
+        val directory = temporaryFolder.newFolder()
+        val cache = WeatherSnapshotCache(directory)
+        val base = snapshot(issuedAt)
+        val quantitative = grid(
+            WeatherUnit.MILLIMETERS_TWELVE_HOURS,
+            "F-C0035-015",
+            issuedAt,
+            floatArrayOf(Float.NaN, .5f, 0f, 2f),
+        )
+        cache.write(base.copy(quantitativeForecastFrames = listOf(quantitative)))
+        val current = cache.read(issuedAt)!!
+        assertArrayEquals(quantitative.values, current.quantitativeForecastFrames.single().values, 0f)
+
+        // Both versions have the same serialized layout and a superseded chart conversion.
+        val cacheFile = directory.listFiles()!!.single()
+        val payload = GZIPInputStream(cacheFile.inputStream()).use { it.readBytes() }
+        for (version in 14..15) {
+            DataOutputStream(GZIPOutputStream(cacheFile.outputStream())).use { output ->
+                output.write(payload, 0, Int.SIZE_BYTES)
+                output.writeInt(version)
+                output.write(payload, 2 * Int.SIZE_BYTES, payload.size - 2 * Int.SIZE_BYTES)
+            }
+            val restored = cache.read(issuedAt)!!
+            assertTrue(restored.quantitativeForecastFrames.isEmpty())
+            assertArrayEquals(base.radar.values, restored.radar.values, 0f)
+            assertArrayEquals(base.rainForecast.single().values, restored.rainForecast.single().values, 0f)
+        }
     }
 
     @Test fun `cache preserves a full official station observation set`() = runTest {
