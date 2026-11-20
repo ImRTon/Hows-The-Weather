@@ -1,14 +1,21 @@
 package com.rton.howstheweather.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,11 +23,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -33,12 +46,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +63,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -54,20 +71,28 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.rton.howstheweather.domain.BottomWear
 import com.rton.howstheweather.domain.ClothingAdvice
 import com.rton.howstheweather.domain.ClothingAdvisor
+import com.rton.howstheweather.domain.ClothingWindow
 import com.rton.howstheweather.domain.HatAdvice
 import com.rton.howstheweather.domain.OuterWear
 import com.rton.howstheweather.domain.RainGear
@@ -78,6 +103,212 @@ import kotlin.math.roundToInt
 private val ColdEnd = Color(0xFF4F8DF0)
 private val NeutralMid = Color(0xFF3FB6A8)
 private val WarmEnd = Color(0xFFE8763A)
+private val ThermalDarkTint = Color(0xFFF28B4E)
+private val ThermalLightTint = Color(0xFFD96528)
+
+private val WINDOW_CAPSULE_TOUCH_HEIGHT = 48.dp
+private val WINDOW_CAPSULE_TRACK_HEIGHT = 26.dp
+private val WINDOW_CAPSULE_INSET = 2.dp
+private val WINDOW_CAPSULE_PILL_H_PAD = 6.dp
+private val WINDOW_CAPSULE_TEXT_GAP = 9.dp
+private val WINDOW_CAPSULE_FLING_THRESHOLD = 400.dp // per second
+private val WindowCapsuleSettleSpring = spring<Float>(dampingRatio = 0.82f, stiffness = 520f)
+
+/**
+ * Three-segment sliding capsule for switching the clothing forecast horizon
+ * (`6 小時` / `12 小時` / `24 小時`), sharing the home rail's pill physics.
+ */
+@Composable
+internal fun ClothingWindowCapsule(
+    selected: ClothingWindow,
+    onSelect: (ClothingWindow) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val windows = ClothingWindow.entries
+    val haptics = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val currentSelected by rememberUpdatedState(selected)
+    val currentOnSelect by rememberUpdatedState(onSelect)
+    val flingThreshold = with(density) { WINDOW_CAPSULE_FLING_THRESHOLD.toPx() }
+    var stepPx by remember { mutableFloatStateOf(with(density) { 44.dp.toPx() }) }
+
+    val position = remember { mutableFloatStateOf(selected.ordinal.toFloat()) }
+    var dragStartIndex by remember { mutableIntStateOf(selected.ordinal) }
+    var dragging by remember { mutableStateOf(false) }
+    var lastTickIndex by remember { mutableIntStateOf(selected.ordinal) }
+    val dragState = rememberDraggableState { delta ->
+        if (stepPx > 0f) {
+            position.floatValue = (position.floatValue + delta / stepPx)
+                .coerceIn(0f, (windows.size - 1).toFloat())
+            val nearest = position.floatValue.roundToInt()
+            if (nearest != lastTickIndex) {
+                lastTickIndex = nearest
+                haptics.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
+            }
+        }
+    }
+
+    suspend fun settleTo(index: Int, velocity: Float) {
+        dragState.drag(MutatePriority.Default) {
+            animate(
+                initialValue = position.floatValue,
+                targetValue = index.toFloat(),
+                initialVelocity = velocity,
+                animationSpec = WindowCapsuleSettleSpring,
+            ) { value, _ -> dragBy((value - position.floatValue) * stepPx) }
+        }
+    }
+
+    LaunchedEffect(selected) {
+        lastTickIndex = selected.ordinal
+        if (!dragging && abs(position.floatValue - selected.ordinal) > 0.001f) {
+            settleTo(selected.ordinal, 0f)
+        }
+    }
+
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    val indicatorColor = MaterialTheme.colorScheme.primaryContainer
+    Layout(
+        modifier = modifier
+            .selectableGroup()
+            .semantics { contentDescription = "穿衣建議時段，可左右滑動切換" }
+            .draggable(
+                state = dragState,
+                orientation = Orientation.Horizontal,
+                onDragStarted = {
+                    dragging = true
+                    dragStartIndex = currentSelected.ordinal
+                },
+                onDragStopped = { velocity ->
+                    val target = resolveLayerSwipeIndex(
+                        startIndex = dragStartIndex,
+                        position = position.floatValue,
+                        velocity = velocity,
+                        velocityThreshold = flingThreshold,
+                        count = windows.size,
+                    )
+                    val window = windows[target]
+                    if (window != currentSelected) {
+                        haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                        currentOnSelect(window)
+                    }
+                    try {
+                        settleTo(target, if (stepPx > 0f) velocity / stepPx else 0f)
+                    } finally {
+                        dragging = false
+                    }
+                },
+            ),
+        content = {
+            Box(Modifier.clip(CircleShape).background(trackColor))
+            Box(Modifier.clip(CircleShape).background(indicatorColor))
+            windows.forEach { window ->
+                val emphasis = (1f - abs(position.floatValue - window.ordinal)).coerceIn(0f, 1f)
+                ClothingWindowSegment(
+                    window = window,
+                    selected = window == selected,
+                    emphasis = emphasis,
+                    onClick = {
+                        if (window != currentSelected) {
+                            haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                            currentOnSelect(window)
+                        }
+                    },
+                )
+            }
+        },
+    ) { measurables, constraints ->
+        val touchHeightPx = WINDOW_CAPSULE_TOUCH_HEIGHT.roundToPx()
+        val trackHeightPx = WINDOW_CAPSULE_TRACK_HEIGHT.roundToPx()
+        val insetPx = WINDOW_CAPSULE_INSET.roundToPx()
+        val pillHeightPx = trackHeightPx - insetPx * 2
+        val overlapSpacingPx = (WINDOW_CAPSULE_TEXT_GAP - WINDOW_CAPSULE_PILL_H_PAD * 2).roundToPx()
+
+        val segmentConstraints = constraints.copy(
+            minWidth = 0,
+            minHeight = touchHeightPx,
+            maxHeight = touchHeightPx,
+        )
+        val segmentPlaceables = measurables.drop(2).map { it.measure(segmentConstraints) }
+        val segmentX = IntArray(segmentPlaceables.size)
+        var cursorX = insetPx
+        segmentPlaceables.forEachIndexed { index, placeable ->
+            segmentX[index] = cursorX
+            cursorX += placeable.width + overlapSpacingPx
+        }
+        val totalWidth = segmentX.last() + segmentPlaceables.last().width + insetPx
+        if (segmentPlaceables.size > 1) {
+            stepPx = (segmentX.last() - segmentX.first()).toFloat() / (segmentPlaceables.size - 1)
+        }
+
+        val pos = position.floatValue.coerceIn(0f, (segmentPlaceables.size - 1).toFloat())
+        val i0 = kotlin.math.floor(pos).toInt().coerceIn(0, segmentPlaceables.lastIndex)
+        val i1 = kotlin.math.ceil(pos).toInt().coerceIn(0, segmentPlaceables.lastIndex)
+        val frac = pos - i0
+        val indX = (segmentX[i0] + (segmentX[i1] - segmentX[i0]) * frac).roundToInt()
+        val indW = (segmentPlaceables[i0].width + (segmentPlaceables[i1].width - segmentPlaceables[i0].width) * frac)
+            .roundToInt()
+
+        val trackPlaceable = measurables[0].measure(
+            androidx.compose.ui.unit.Constraints.fixed(totalWidth, trackHeightPx),
+        )
+        val indicatorPlaceable = measurables[1].measure(
+            androidx.compose.ui.unit.Constraints.fixed(indW, pillHeightPx),
+        )
+
+        layout(totalWidth, touchHeightPx) {
+            trackPlaceable.place(0, (touchHeightPx - trackHeightPx) / 2)
+            indicatorPlaceable.place(indX, (touchHeightPx - pillHeightPx) / 2)
+            segmentPlaceables.forEachIndexed { index, placeable ->
+                placeable.place(segmentX[index], 0)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClothingWindowSegment(
+    window: ClothingWindow,
+    selected: Boolean,
+    emphasis: Float,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val idle = MaterialTheme.colorScheme.onSurfaceVariant
+    val active = MaterialTheme.colorScheme.onSurface
+    val textColor = lerp(idle, active, emphasis)
+    Box(
+        modifier = modifier
+            .selectable(
+                selected = selected,
+                interactionSource = interaction,
+                indication = null,
+                role = Role.Tab,
+                onClick = onClick,
+            )
+            .semantics { contentDescription = "未來 ${window.hours} 小時" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .matchParentSize()
+                .padding(vertical = (WINDOW_CAPSULE_TOUCH_HEIGHT - WINDOW_CAPSULE_TRACK_HEIGHT) / 2 + WINDOW_CAPSULE_INSET)
+                .clip(CircleShape)
+                .indication(interaction, ripple(color = MaterialTheme.colorScheme.primary)),
+        )
+        Text(
+            text = window.label,
+            modifier = Modifier.padding(horizontal = WINDOW_CAPSULE_PILL_H_PAD),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = if (emphasis > .5f) FontWeight.SemiBold else FontWeight.Medium,
+            color = textColor,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
 
 @Composable
 internal fun ClothingAdviceCard(
@@ -204,7 +435,7 @@ private fun GarmentTile(
             label = "garmentLabel",
         ) { value ->
             Text(
-                value,
+                formatGarmentLabelForWrap(value),
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = if (needed) FontWeight.Bold else FontWeight.Medium,
                 color = if (needed) colors.onSurface else colors.onSurfaceVariant,
@@ -357,13 +588,25 @@ private fun feelsLikeLine(advice: ClothingAdvice, tolerance: Int): String = buil
 internal fun topLabel(top: TopWear): String = when (top) {
     TopWear.SHORT_SLEEVE -> "短袖"
     TopWear.LIGHT_LONG_SLEEVE -> "薄長袖"
-    TopWear.WARM_LAYER -> "長袖＋毛衣"
-    TopWear.THERMAL_LAYER -> "發熱衣＋毛衣"
+    TopWear.WARM_LAYER -> "長袖+發熱衣"
+    TopWear.THERMAL_LAYER -> "厚長袖+發熱衣"
+}
+
+/**
+ * Keeps each garment term intact around `+` when a narrow tile wraps to two lines,
+ * so `"厚長袖+發熱衣"` wraps cleanly after `+` rather than splitting `"發熱衣"`.
+ */
+internal fun formatGarmentLabelForWrap(label: String): String {
+    if ('+' !in label) return label
+    return label
+        .split('+')
+        .joinToString(separator = "\u2060+\u200B") { part ->
+            part.toCharArray().joinToString(separator = "\u2060")
+        }
 }
 
 private fun topDetail(advice: ClothingAdvice): String? = when {
     advice.muggy -> "透氣排汗"
-    advice.top == TopWear.WARM_LAYER -> "或帽 T"
     else -> null
 }
 
@@ -439,15 +682,25 @@ private fun DrawScope.line(tint: Color, vararg points: Pair<Float, Float>, width
     drawPath(path, tint, style = Stroke(width.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
 }
 
-private fun DrawScope.upperBodyPath(longSleeves: Boolean, bodyHalfWidth: Float = .23f): Path {
+private fun DrawScope.upperBodyPath(
+    longSleeves: Boolean,
+    bodyHalfWidth: Float = .23f,
+    scale: Float = 1f,
+    offsetX: Float = 0f,
+    offsetY: Float = 0f,
+): Path {
     val left = .5f - bodyHalfWidth
     val right = .5f + bodyHalfWidth
     val path = Path()
-    fun to(x: Float, y: Float) = unit(x, y).let { path.lineTo(it.x, it.y) }
-    unit(.38f, .1f).let { path.moveTo(it.x, it.y) }
-    val neck = unit(.5f, .2f)
-    val neckEnd = unit(.62f, .1f)
-    path.quadraticTo(neck.x, neck.y + 2f, neckEnd.x, neckEnd.y)
+    fun mappedUnit(x: Float, y: Float) = unit(
+        .5f + (x - .5f) * scale + offsetX,
+        .5f + (y - .5f) * scale + offsetY,
+    )
+    fun to(x: Float, y: Float) = mappedUnit(x, y).let { path.lineTo(it.x, it.y) }
+    mappedUnit(.38f, .1f).let { path.moveTo(it.x, it.y) }
+    val neck = mappedUnit(.5f, .2f)
+    val neckEnd = mappedUnit(.62f, .1f)
+    path.quadraticTo(neck.x, neck.y + 2f * scale, neckEnd.x, neckEnd.y)
     to(.8f, .17f)
     if (longSleeves) {
         to(.96f, .84f); to(.83f, .87f); to(right, .4f)
@@ -466,21 +719,80 @@ private fun DrawScope.upperBodyPath(longSleeves: Boolean, bodyHalfWidth: Float =
     return path
 }
 
+private fun DrawScope.transformedLine(
+    tint: Color,
+    scale: Float,
+    offsetX: Float,
+    offsetY: Float,
+    vararg points: Pair<Float, Float>,
+    width: Float = 1.6f,
+) {
+    val mapped = Array(points.size) { index ->
+        val (x, y) = points[index]
+        (.5f + (x - .5f) * scale + offsetX) to (.5f + (y - .5f) * scale + offsetY)
+    }
+    line(tint, *mapped, width = width)
+}
+
+private fun thermalLayerColor(frontTint: Color): Color =
+    if (frontTint.luminance() > .45f) ThermalDarkTint else ThermalLightTint
+
 private fun DrawScope.drawTop(top: TopWear, tint: Color) {
     when (top) {
         TopWear.SHORT_SLEEVE -> garment(upperBodyPath(longSleeves = false), tint)
         TopWear.LIGHT_LONG_SLEEVE -> garment(upperBodyPath(longSleeves = true, bodyHalfWidth = .21f), tint)
         TopWear.WARM_LAYER -> {
-            garment(upperBodyPath(longSleeves = true), tint)
-            line(tint, .3f to .84f, .7f to .84f)
-            line(tint, .11f to .78f, .2f to .8f)
-            line(tint, .89f to .78f, .8f to .8f)
+            val scale = .86f
+            val frontX = -.05f
+            val frontY = .05f
+            val backPath = upperBodyPath(
+                longSleeves = true,
+                bodyHalfWidth = .21f,
+                scale = scale,
+                offsetX = .07f,
+                offsetY = -.07f,
+            )
+            val frontPath = upperBodyPath(
+                longSleeves = true,
+                bodyHalfWidth = .21f,
+                scale = scale,
+                offsetX = frontX,
+                offsetY = frontY,
+            )
+            val warmTint = thermalLayerColor(tint)
+            clipPath(frontPath, ClipOp.Difference) {
+                garment(backPath, warmTint)
+            }
+            garment(frontPath, tint)
+            transformedLine(tint, scale, frontX, frontY, .32f to .84f, .68f to .84f)
         }
         TopWear.THERMAL_LAYER -> {
-            garment(upperBodyPath(longSleeves = true), tint)
-            line(tint, .3f to .84f, .7f to .84f)
-            line(tint, .3f to .76f, .7f to .76f)
-            line(tint, .42f to .06f, .5f to .12f, .58f to .06f)
+            val scale = .86f
+            val frontX = -.05f
+            val frontY = .05f
+            val backPath = upperBodyPath(
+                longSleeves = true,
+                bodyHalfWidth = .21f,
+                scale = scale,
+                offsetX = .07f,
+                offsetY = -.07f,
+            )
+            val frontPath = upperBodyPath(
+                longSleeves = true,
+                bodyHalfWidth = .24f,
+                scale = scale,
+                offsetX = frontX,
+                offsetY = frontY,
+            )
+            val warmTint = thermalLayerColor(tint)
+            clipPath(frontPath, ClipOp.Difference) {
+                garment(backPath, warmTint)
+            }
+            garment(frontPath, tint)
+            transformedLine(tint, scale, frontX, frontY, .29f to .84f, .71f to .84f)
+            transformedLine(tint, scale, frontX, frontY, .29f to .75f, .71f to .75f)
+            transformedLine(tint, scale, frontX, frontY, .11f to .78f, .2f to .8f)
+            transformedLine(tint, scale, frontX, frontY, .89f to .78f, .8f to .8f)
         }
     }
 }

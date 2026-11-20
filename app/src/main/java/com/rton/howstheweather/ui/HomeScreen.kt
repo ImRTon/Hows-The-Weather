@@ -31,6 +31,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.indication
@@ -91,7 +92,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -105,7 +108,6 @@ import com.rton.howstheweather.data.OBSERVATION_FRAME_INTERVAL_MINUTES
 import com.rton.howstheweather.data.OBSERVATION_HISTORY_MINUTES
 import com.rton.howstheweather.domain.*
 import com.rton.howstheweather.render.RenderTheme
-import com.rton.howstheweather.render.CloudEnhancedPalette
 import com.rton.howstheweather.render.WeatherRenderStyle
 import com.rton.howstheweather.render.WeatherTileProvider
 import java.time.ZoneId
@@ -117,6 +119,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -144,6 +147,7 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
             AppDestination.SUMMARY -> SummaryScreen(
                 state = state,
                 onClothingToleranceChange = viewModel::setClothingTolerance,
+                onClothingWindowChange = viewModel::setClothingWindow,
                 modifier = Modifier.padding(padding).fillMaxSize(),
             )
             AppDestination.FORECAST -> ForecastScreen(
@@ -1499,13 +1503,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     val tileOverlaysAttached = firstTileLayerState.isAttached && secondTileLayerState.isAttached
     val tileProviders = remember(grid?.unit, renderTheme) {
         grid?.let {
-            val style = when (it.unit) {
-                WeatherUnit.DBZ -> WeatherRenderStyle.radar(renderTheme, 1f)
-                WeatherUnit.MILLIMETERS_PER_HOUR -> WeatherRenderStyle.rain(renderTheme, 1f)
-                WeatherUnit.MILLIMETERS_ONE_HOUR -> WeatherRenderStyle.hourlyRain(renderTheme, 1f)
-                WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(renderTheme, 1f)
-                WeatherUnit.LUMINANCE -> WeatherRenderStyle.cloud(renderTheme, 1f)
-            }
+            val style = weatherRenderStyle(it.unit, renderTheme)
             arrayOf(
                 WeatherTileProvider(it, style, context.cacheDir.resolve("weather-tiles")),
                 WeatherTileProvider(it, style, context.cacheDir.resolve("weather-tiles")),
@@ -2669,40 +2667,96 @@ internal fun TimelineScrubber(
 internal fun WeatherLegend(
     unit: WeatherUnit,
     modifier: Modifier = Modifier,
-    customLabels: List<String>? = null,
 ) {
     val renderTheme = if (MaterialTheme.colorScheme.background.luminance() < .35f) RenderTheme.DARK else RenderTheme.LIGHT
-    val colors = if (unit == WeatherUnit.LUMINANCE) {
-        CloudEnhancedPalette.colors(renderTheme)
-    } else {
-        listOf(0xFF37D6E6, 0xFF4169D8, 0xFF6D3AC6, 0xFFB62B96, 0xFFE64A54, 0xFFF49A38, 0xFFFFF1B5)
-            .map(Long::toInt)
+    val style = remember(unit, renderTheme) { weatherRenderStyle(unit, renderTheme) }
+    val start = style.normalize(style.valueStops.first())
+    val gradient = remember(style) {
+        // The LUT entries below the first visible value are transparent.
+        val firstColor = ceil(start * style.colorLut.lastIndex).toInt()
+        Brush.horizontalGradient(style.colorLut.drop(firstColor).map { Color(it) })
     }
-    val labels = customLabels ?: when (unit) {
-        WeatherUnit.DBZ -> listOf("5", "15", "25", "35", "45", "55", "65 dBZ")
-        WeatherUnit.MILLIMETERS_PER_HOUR -> listOf("0.1", "0.5", "2.5", "10", "25", "50", "100 mm/h")
-        WeatherUnit.MILLIMETERS_ONE_HOUR -> listOf("0.1", "0.5", "2.5", "10", "25", "50", "100 mm/1h")
-        WeatherUnit.MILLIMETERS_TWELVE_HOURS -> listOf("0.1", "0.5", "2.5", "10", "25", "50", "100+ mm/12h")
-        WeatherUnit.LUMINANCE -> listOf("低亮", "", "", "雲頂", "", "", "高亮")
-    }
-    Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        colors.forEachIndexed { index, value ->
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Box(
-                    Modifier
-                        .size(width = 30.dp, height = 6.dp)
-                        .background(Color(value), RoundedCornerShape(99.dp)),
-                )
-                Text(
-                    text = labels[index],
-                    fontSize = 8.sp,
-                    lineHeight = 10.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    val ticks = remember(style) {
+        val end = style.normalize(style.valueStops.last())
+        val cloudLabels = listOf("低亮", null, null, "雲頂", null, null, "高亮")
+        style.valueStops.asList().mapIndexedNotNull { index, value ->
+            val number = value.toString().removeSuffix(".0")
+            val label = when {
+                unit == WeatherUnit.LUMINANCE -> cloudLabels[index]
+                unit == WeatherUnit.MILLIMETERS_TWELVE_HOURS && index == style.valueStops.lastIndex -> "$number+"
+                else -> number
             }
+            label?.let { (style.normalize(value) - start) / (end - start) to it }
         }
     }
+    val unitLabel = when (unit) {
+        WeatherUnit.DBZ -> "dBZ"
+        WeatherUnit.MILLIMETERS_PER_HOUR -> "mm/h"
+        WeatherUnit.MILLIMETERS_ONE_HOUR -> "mm/1h"
+        WeatherUnit.MILLIMETERS_TWELVE_HOURS -> "mm/12h"
+        WeatherUnit.LUMINANCE -> null
+    }
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val outline = MaterialTheme.colorScheme.outline
+    val labelStyle = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
+    Row(
+        modifier = modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        Layout(
+            modifier = Modifier.weight(1f),
+            content = {
+                Column {
+                    Box(
+                        Modifier.fillMaxWidth().height(6.dp)
+                            .background(gradient, CircleShape)
+                            .border(0.5.dp, outline.copy(alpha = .45f), CircleShape),
+                    )
+                    Canvas(Modifier.fillMaxWidth().height(3.dp)) {
+                        ticks.forEach { (fraction, _) ->
+                            val x = (size.width - 1f).coerceAtLeast(0f) * fraction + .5f
+                            drawLine(outline, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
+                        }
+                    }
+                }
+                ticks.forEach { (_, label) ->
+                    Text(label, color = labelColor, style = labelStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            },
+        ) { measurables, constraints ->
+            val width = constraints.maxWidth
+            val labels = measurables.drop(1).map { it.measure(Constraints(maxWidth = width / 2)) }
+            val startInset = labels.first().width / 2
+            val endInset = (labels.last().width + 1) / 2
+            val scale = measurables.first().measure(Constraints.fixedWidth(width - startInset - endInset))
+            val labelTop = scale.height + 1.dp.roundToPx()
+            val labelGap = 4.dp.roundToPx()
+            layout(width, constraints.constrainHeight(labelTop + labels.maxOf { it.height })) {
+                scale.place(startInset, 0)
+                labels.first().place(0, labelTop)
+                var previousEnd = labels.first().width
+                val lastStart = width - labels.last().width
+                // Keep the endpoints readable when larger text leaves less room between ticks.
+                for (index in 1 until labels.lastIndex) {
+                    val label = labels[index]
+                    val x = startInset + (ticks[index].first * scale.width).roundToInt() - label.width / 2
+                    if (x >= previousEnd + labelGap && x + label.width + labelGap <= lastStart) {
+                        label.place(x, labelTop)
+                        previousEnd = x + label.width
+                    }
+                }
+                labels.last().place(lastStart, labelTop)
+            }
+        }
+        unitLabel?.let { Text(it, color = labelColor, style = labelStyle, maxLines = 1) }
+    }
+}
+
+private fun weatherRenderStyle(unit: WeatherUnit, theme: RenderTheme): WeatherRenderStyle = when (unit) {
+    WeatherUnit.DBZ -> WeatherRenderStyle.radar(theme, 1f)
+    WeatherUnit.MILLIMETERS_PER_HOUR -> WeatherRenderStyle.rain(theme, 1f)
+    WeatherUnit.MILLIMETERS_ONE_HOUR -> WeatherRenderStyle.hourlyRain(theme, 1f)
+    WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(theme, 1f)
+    WeatherUnit.LUMINANCE -> WeatherRenderStyle.cloud(theme, 1f)
 }

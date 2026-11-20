@@ -1,5 +1,7 @@
 package com.rton.howstheweather.domain
 
+import com.rton.howstheweather.ui.formatGarmentLabelForWrap
+import com.rton.howstheweather.ui.topLabel
 import java.time.Instant
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
@@ -86,6 +88,74 @@ class ClothingAdvisorTest {
 
         assertEquals(24, advice.feelsLikeMinimum)
         assertEquals(OuterWear.NONE, advice.outer)
+    }
+
+    @Test fun `selectable 6 12 and 24 hour windows scope advice to matching periods`() {
+        val now = Instant.parse("2026-11-19T00:00:00Z")
+        val forecast = forecast(
+            period(now, 0, 23, 25),
+            period(now, 9, 15, 17),
+            period(now, 18, 9, 11),
+        )
+
+        val sixHours = ClothingAdvisor.advise(
+            forecast = forecast,
+            weekly = null,
+            tolerance = 0,
+            now = now,
+            zone = zone,
+            window = ClothingWindow.HOURS_6.duration,
+        )!!
+        assertEquals(23, sixHours.feelsLikeMinimum)
+        assertEquals(TopWear.SHORT_SLEEVE, sixHours.top)
+        assertEquals(OuterWear.NONE, sixHours.outer)
+
+        val twelveHours = ClothingAdvisor.advise(
+            forecast = forecast,
+            weekly = null,
+            tolerance = 0,
+            now = now,
+            zone = zone,
+            window = ClothingWindow.HOURS_12.duration,
+        )!!
+        assertEquals(15, twelveHours.feelsLikeMinimum)
+        assertEquals(TopWear.SHORT_SLEEVE, twelveHours.top)
+        assertEquals(OuterWear.LIGHT, twelveHours.outer)
+
+        val twentyFourHours = ClothingAdvisor.advise(
+            forecast = forecast,
+            weekly = null,
+            tolerance = 0,
+            now = now,
+            zone = zone,
+            window = ClothingWindow.HOURS_24.duration,
+        )!!
+        assertEquals(9, twentyFourHours.feelsLikeMinimum)
+        assertEquals(TopWear.LIGHT_LONG_SLEEVE, twentyFourHours.top)
+        assertEquals(OuterWear.HEAVY, twentyFourHours.outer)
+
+        assertEquals(ClothingWindow.HOURS_6, ClothingWindow.fromHours(6))
+        assertEquals(ClothingWindow.HOURS_12, ClothingWindow.fromHours(12))
+        assertEquals(ClothingWindow.HOURS_24, ClothingWindow.fromHours(24))
+        assertEquals(ClothingWindow.HOURS_12, ClothingWindow.fromHours(99))
+    }
+
+    @Test fun `long sleeve tiers split into light long sleeve thermal plus long sleeve and thermal plus thick long sleeve`() {
+        assertEquals("短袖", topLabel(TopWear.SHORT_SLEEVE))
+        assertEquals("薄長袖", topLabel(TopWear.LIGHT_LONG_SLEEVE))
+        assertEquals("長袖+發熱衣", topLabel(TopWear.WARM_LAYER))
+        assertEquals("厚長袖+發熱衣", topLabel(TopWear.THERMAL_LAYER))
+
+        assertFalse(TopWear.SHORT_SLEEVE.hasThermalLayer)
+        assertFalse(TopWear.LIGHT_LONG_SLEEVE.hasThermalLayer)
+        assertTrue(TopWear.WARM_LAYER.hasThermalLayer)
+        assertTrue(TopWear.THERMAL_LAYER.hasThermalLayer)
+
+        assertEquals("薄長袖", formatGarmentLabelForWrap("薄長袖"))
+        assertEquals(
+            "厚\u2060長\u2060袖\u2060+\u200B發\u2060熱\u2060衣",
+            formatGarmentLabelForWrap("厚長袖+發熱衣"),
+        )
     }
 
     @Test fun `likely rain asks for a waterproof jacket and an umbrella`() {

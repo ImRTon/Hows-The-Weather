@@ -5,11 +5,30 @@ import java.time.Instant
 import java.time.ZoneId
 import kotlin.math.exp
 
-enum class TopWear { SHORT_SLEEVE, LIGHT_LONG_SLEEVE, WARM_LAYER, THERMAL_LAYER }
+enum class TopWear(val hasThermalLayer: Boolean = false) {
+    SHORT_SLEEVE,
+    LIGHT_LONG_SLEEVE,
+    WARM_LAYER(hasThermalLayer = true),
+    THERMAL_LAYER(hasThermalLayer = true),
+}
 enum class OuterWear { NONE, CARRY_LIGHT, LIGHT, REGULAR, HEAVY, DOWN }
 enum class BottomWear { SHORTS, SHORTS_OR_TROUSERS, TROUSERS, WARM_TROUSERS }
 enum class HatAdvice { NONE, SUN, SUN_WINDY, BEANIE }
 enum class RainGear { NONE, FOLDING_UMBRELLA, UMBRELLA }
+
+enum class ClothingWindow(val hours: Int, val label: String) {
+    HOURS_6(6, "6 小時"),
+    HOURS_12(12, "12 小時"),
+    HOURS_24(24, "24 小時"),
+    ;
+
+    val duration: Duration = Duration.ofHours(hours.toLong())
+
+    companion object {
+        fun fromHours(hours: Int): ClothingWindow =
+            entries.firstOrNull { it.hours == hours } ?: HOURS_12
+    }
+}
 
 data class ClothingAdvice(
     val windowStart: Instant,
@@ -79,9 +98,10 @@ object ClothingAdvisor {
         now: Instant,
         zone: ZoneId,
         rainingNow: Boolean = false,
+        window: Duration = WINDOW,
     ): ClothingAdvice? {
         forecast ?: return null
-        val windowEnd = now.plus(WINDOW)
+        val windowEnd = now.plus(window)
         val periods = forecast.periods.filter { it.endAt.isAfter(now) && it.startAt.isBefore(windowEnd) }
         if (periods.isEmpty()) return null
 

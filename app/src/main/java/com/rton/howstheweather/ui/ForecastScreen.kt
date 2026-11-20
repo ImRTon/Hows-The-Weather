@@ -70,6 +70,7 @@ import com.rton.howstheweather.domain.AirQualityObservation
 import com.rton.howstheweather.domain.AreaForecast
 import com.rton.howstheweather.domain.AreaForecastPeriod
 import com.rton.howstheweather.domain.ClothingAdvisor
+import com.rton.howstheweather.domain.ClothingWindow
 import com.rton.howstheweather.domain.HomeUiState
 import com.rton.howstheweather.domain.RainState
 import java.time.Duration
@@ -94,13 +95,21 @@ private fun rememberUpcomingPeriods(areaForecast: AreaForecast?, now: Instant): 
 fun SummaryScreen(
     state: HomeUiState,
     onClothingToleranceChange: (Int) -> Unit,
+    onClothingWindowChange: (ClothingWindow) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val zone = remember { ZoneId.of("Asia/Taipei") }
     val now = remember(state.areaForecast, state.weeklyForecast) { Instant.now() }
     val upcomingPeriods = rememberUpcomingPeriods(state.areaForecast, now)
     val rainingNow = state.decision.state in RAINING_STATES
-    val clothingAdvice = remember(state.areaForecast, state.weeklyForecast, state.clothingTolerance, now, rainingNow) {
+    val clothingAdvice = remember(
+        state.areaForecast,
+        state.weeklyForecast,
+        state.clothingTolerance,
+        state.clothingWindow,
+        now,
+        rainingNow,
+    ) {
         ClothingAdvisor.advise(
             forecast = state.areaForecast,
             weekly = state.weeklyForecast,
@@ -108,6 +117,7 @@ fun SummaryScreen(
             now = now,
             zone = zone,
             rainingNow = rainingNow,
+            window = state.clothingWindow.duration,
         )
     }
 
@@ -136,7 +146,15 @@ fun SummaryScreen(
         }
 
         if (clothingAdvice != null) {
-            ForecastSection(title = "怎麼穿", subtitle = "接下來 12 小時") {
+            ForecastSection(
+                title = "穿衣建議",
+                trailing = {
+                    ClothingWindowCapsule(
+                        selected = state.clothingWindow,
+                        onSelect = onClothingWindowChange,
+                    )
+                },
+            ) {
                 ClothingAdviceCard(
                     advice = clothingAdvice,
                     tolerance = state.clothingTolerance,
@@ -196,11 +214,16 @@ fun ForecastScreen(
 }
 
 @Composable
-private fun ForecastSection(title: String, subtitle: String?, content: @Composable () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun ForecastSection(
+    title: String,
+    subtitle: String? = null,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(if (trailing != null) 0.dp else 8.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.Bottom,
+            verticalAlignment = if (trailing != null) Alignment.CenterVertically else Alignment.Bottom,
         ) {
             Text(
                 title,
@@ -209,8 +232,9 @@ private fun ForecastSection(title: String, subtitle: String?, content: @Composab
                 fontWeight = FontWeight.Bold,
             )
             Spacer(Modifier.weight(1f))
-            if (subtitle != null) {
-                Text(
+            when {
+                trailing != null -> trailing()
+                subtitle != null -> Text(
                     subtitle,
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -362,10 +386,13 @@ private fun AirQualityCard(
     zone: ZoneId,
 ) {
     val timeFormatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(zone) }
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.surface.luminance() < .5f
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = colors.surfaceVariant,
     ) {
         when {
             loading -> Row(
@@ -377,8 +404,9 @@ private fun AirQualityCard(
                 Text("正在取得鄰近測站 AQI")
             }
             observation != null -> {
-                val color = aqiColor(observation.aqi)
                 val level = aqiLevelIndex(observation.aqi)
+                val color = aqiColor(observation.aqi)
+                val trackColor = aqiTierTrackColor(level, dark)
                 Box(
                     Modifier.clearAndSetSemantics {
                         contentDescription = buildString {
@@ -396,7 +424,7 @@ private fun AirQualityCard(
                 ) {
                     AirQualityLevelFill(
                         aqi = observation.aqi,
-                        color = color,
+                        color = trackColor,
                         modifier = Modifier.matchParentSize(),
                     )
                     Column(
@@ -406,14 +434,15 @@ private fun AirQualityCard(
                         Row(verticalAlignment = Alignment.Bottom) {
                             Text(
                                 "${observation.aqi}",
+                                modifier = Modifier.alignByBaseline(),
                                 style = MaterialTheme.typography.displaySmall,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface,
+                                color = colors.onSurface,
                             )
                             Spacer(Modifier.width(10.dp))
                             Text(
                                 observation.status,
-                                modifier = Modifier.padding(bottom = 6.dp),
+                                modifier = Modifier.alignByBaseline(),
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = color,
@@ -421,9 +450,9 @@ private fun AirQualityCard(
                             Spacer(Modifier.weight(1f))
                             Text(
                                 "觀測 ${timeFormatter.format(observation.observedAt)}",
-                                modifier = Modifier.padding(bottom = 8.dp),
+                                modifier = Modifier.alignByBaseline(),
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = colors.onSurfaceVariant,
                             )
                         }
                         Text(
@@ -432,7 +461,7 @@ private fun AirQualityCard(
                                 observation.primaryPollutant?.let { append(" · 指標污染物 ").append(it) }
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = colors.onSurfaceVariant,
                         )
                     }
                 }
@@ -441,9 +470,9 @@ private fun AirQualityCard(
                 Modifier.padding(16.dp).heightIn(min = 48.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Default.Air, null, modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(Icons.Default.Air, null, modifier = Modifier.size(28.dp), tint = colors.onSurfaceVariant)
                 Spacer(Modifier.width(12.dp))
-                Text(unavailableReason ?: "AQI 暫無資料", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(unavailableReason ?: "AQI 暫無資料", color = colors.onSurfaceVariant)
             }
         }
     }
@@ -985,11 +1014,5 @@ private fun forecastIconColor(description: String): Color = when {
 @Composable
 private fun aqiColor(aqi: Int): Color {
     val dark = MaterialTheme.colorScheme.surface.luminance() < .5f
-    return when (aqi) {
-        in 0..50 -> if (dark) Color(0xFF4CC38A) else Color(0xFF14805E)
-        in 51..100 -> if (dark) Color(0xFFE0C341) else Color(0xFF8A6A00)
-        in 101..150 -> if (dark) Color(0xFFFF9A4D) else Color(0xFFC05A00)
-        in 151..200 -> MaterialTheme.colorScheme.error
-        else -> if (dark) Color(0xFFD99BD8) else Color(0xFF8A2E88)
-    }
+    return aqiTierTextColor(aqiLevelIndex(aqi), dark)
 }

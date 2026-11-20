@@ -199,10 +199,7 @@ private fun QuantitativeRainLegend(
                     )
                 }
             }
-            WeatherLegend(
-                unit = WeatherUnit.MILLIMETERS_TWELVE_HOURS,
-                customLabels = listOf("0.1", "0.5", "2.5", "10", "25", "50", "100+"),
-            )
+            WeatherLegend(unit = WeatherUnit.MILLIMETERS_TWELVE_HOURS)
         }
     }
 }

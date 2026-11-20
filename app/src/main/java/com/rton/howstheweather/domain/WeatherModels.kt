@@ -416,6 +416,7 @@ data class HomeUiState(
     val themePreference: ThemePreference = ThemePreference.SYSTEM,
     /** Personal feels-like offset in °C: negative dresses warmer, positive dresses lighter. */
     val clothingTolerance: Int = 0,
+    val clothingWindow: ClothingWindow = ClothingWindow.HOURS_12,
     val activeGrid: WeatherGrid? = null,
     val quantitativeRainGrid: WeatherGrid? = null,
     val quantitativeForecastFrames: List<WeatherGrid> = emptyList(),

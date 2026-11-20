@@ -98,6 +98,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
     private var windSelectionChanged = false
     private var typhoonSelectionChanged = false
     private var clothingToleranceChanged = false
+    private var clothingWindowChanged = false
     private var typhoonJob: Job? = null
     private var autoRefreshJob: Job? = null
     private var lastRefreshStartedAt = Long.MIN_VALUE / 2
@@ -128,6 +129,9 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
             destination = savedStateHandle.get<String>("destination")
                 ?.let { runCatching { AppDestination.valueOf(it) }.getOrNull() }
                 ?: AppDestination.NOW,
+            clothingWindow = savedStateHandle.get<Int>(CLOTHING_WINDOW_HOURS_STATE_KEY)
+                ?.let(ClothingWindow::fromHours)
+                ?: ClothingWindow.HOURS_12,
         ),
     )
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -137,6 +141,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         restoreWindPreference()
         restoreTyphoonPreference()
         restoreClothingTolerance()
+        restoreClothingWindow()
         refresh()
     }
 
@@ -228,6 +233,31 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         viewModelScope.launch {
             getApplication<Application>().userPreferencesDataStore.edit { preferences ->
                 preferences[CLOTHING_TOLERANCE_KEY] = value
+            }
+        }
+    }
+
+    private fun restoreClothingWindow() {
+        viewModelScope.launch {
+            val persistedHours = catchingCancellable {
+                getApplication<Application>().userPreferencesDataStore.data.first()[CLOTHING_WINDOW_HOURS_KEY]
+            }.getOrNull() ?: return@launch
+            if (!clothingWindowChanged && savedStateHandle.get<Int>(CLOTHING_WINDOW_HOURS_STATE_KEY) == null) {
+                val window = ClothingWindow.fromHours(persistedHours)
+                savedStateHandle[CLOTHING_WINDOW_HOURS_STATE_KEY] = window.hours
+                _uiState.update { it.copy(clothingWindow = window) }
+            }
+        }
+    }
+
+    fun setClothingWindow(window: ClothingWindow) {
+        if (window == _uiState.value.clothingWindow) return
+        clothingWindowChanged = true
+        savedStateHandle[CLOTHING_WINDOW_HOURS_STATE_KEY] = window.hours
+        _uiState.update { it.copy(clothingWindow = window) }
+        viewModelScope.launch {
+            getApplication<Application>().userPreferencesDataStore.edit { preferences ->
+                preferences[CLOTHING_WINDOW_HOURS_KEY] = window.hours
             }
         }
     }
@@ -1364,9 +1394,11 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         val WIND_ENABLED_KEY = booleanPreferencesKey("wind_enabled")
         val TYPHOON_ENABLED_KEY = booleanPreferencesKey("typhoon_enabled")
         val CLOTHING_TOLERANCE_KEY = intPreferencesKey("clothing_tolerance")
+        val CLOTHING_WINDOW_HOURS_KEY = intPreferencesKey("clothing_window_hours")
         const val PANEL_ANCHOR_STATE_KEY = "panelAnchor"
         const val WIND_ENABLED_STATE_KEY = "windEnabled"
         const val TYPHOON_ENABLED_STATE_KEY = "typhoonEnabled"
+        const val CLOTHING_WINDOW_HOURS_STATE_KEY = "clothingWindowHours"
         const val MAP_CENTER_LATITUDE_STATE_KEY = "mapCenterLatitude"
         const val MAP_CENTER_LONGITUDE_STATE_KEY = "mapCenterLongitude"
         const val MAP_ZOOM_STATE_KEY = "mapZoom"
