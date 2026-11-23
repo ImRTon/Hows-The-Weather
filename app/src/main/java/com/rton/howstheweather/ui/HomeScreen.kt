@@ -42,6 +42,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
@@ -110,12 +111,16 @@ import com.rton.howstheweather.domain.*
 import com.rton.howstheweather.render.RenderTheme
 import com.rton.howstheweather.render.WeatherRenderStyle
 import com.rton.howstheweather.render.WeatherTileProvider
+import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.PI
 import kotlin.math.abs
@@ -190,6 +195,7 @@ private fun WeatherNavigationBar(
 @Composable
 private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
     val formatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()) }
+    val isNow = state.destination == AppDestination.NOW
     val timeContext = when (state.destination) {
         AppDestination.SUMMARY -> "天氣概況 · 穿搭 · 空氣品質"
         AppDestination.FORECAST -> "逐 3 小時 · 本週日夜"
@@ -206,14 +212,19 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
             else -> "現在 · 雷達觀測"
         }
     }
-    Surface(color = MaterialTheme.colorScheme.surface) {
-        Column {
+    val surface = MaterialTheme.colorScheme.surface
+    val header: @Composable () -> Unit = {
+        Column(Modifier.background(surface)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.statusBars)
-                    .height(48.dp)
-                    .padding(start = 16.dp),
+                    .then(if (isNow) Modifier.heightIn(min = 48.dp) else Modifier.height(48.dp))
+                    .padding(
+                        start = 16.dp,
+                        end = if (isNow) 12.dp else 0.dp,
+                        top = if (isNow) 4.dp else 0.dp,
+                        bottom = if (isNow) 4.dp else 0.dp,
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -245,12 +256,20 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
                         )}",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (state.decision.isStale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
+                        maxLines = if (isNow) 2 else 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                IconButton(onClick = viewModel::refresh) { Icon(Icons.Default.Refresh, "重新整理") }
-                IconButton(onClick = viewModel::cycleTheme) { Icon(Icons.Default.Contrast, "切換亮暗主題") }
+                if (isNow) {
+                    val now = remember(state.areaForecast, state.weeklyForecast) { Instant.now() }
+                    val zone = remember { ZoneId.of("Asia/Taipei") }
+                    rememberClothingAdvice(state, now, zone)?.let { advice ->
+                        ClothingAdviceIcons(advice, Modifier.padding(start = 8.dp))
+                    }
+                } else {
+                    IconButton(onClick = viewModel::refresh) { Icon(Icons.Default.Refresh, "重新整理") }
+                    IconButton(onClick = viewModel::cycleTheme) { Icon(Icons.Default.Contrast, "切換亮暗主題") }
+                }
             }
             Box(Modifier.fillMaxWidth().height(2.dp)) {
                 if (state.isUpdating || state.isHistoryLoading) {
@@ -269,6 +288,101 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
                     )
                 }
             }
+        }
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .background(surface)
+            .windowInsetsPadding(WindowInsets.statusBars),
+    ) {
+        if (isNow) {
+            NowPullToRefreshHeader(state.isUpdating, viewModel::refresh, header)
+        } else {
+            header()
+        }
+    }
+}
+
+private val HeaderRefreshThreshold = 36.dp
+private val HeaderMaxPull = 48.dp
+
+@Composable
+private fun NowPullToRefreshHeader(
+    isUpdating: Boolean,
+    onRefresh: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val pull = remember { mutableFloatStateOf(0f) }
+    val updating by rememberUpdatedState(isUpdating)
+    val refresh by rememberUpdatedState(onRefresh)
+    val density = LocalDensity.current
+    val thresholdPx = with(density) { HeaderRefreshThreshold.toPx() }
+    val maxPullPx = with(density) { HeaderMaxPull.toPx() }
+
+    Box(
+        Modifier
+            .semantics(mergeDescendants = true) {
+                if (!isUpdating) {
+                    onClick(label = "重新整理天氣") {
+                        refresh()
+                        true
+                    }
+                }
+            }
+            .pointerInput(thresholdPx, maxPullPx) {
+                coroutineScope {
+                    var rebound: Job? = null
+
+                    fun release(allowRefresh: Boolean) {
+                        if (allowRefresh && pull.floatValue >= thresholdPx && !updating) {
+                            refresh()
+                        }
+                        if (pull.floatValue > 0f) {
+                            rebound = launch {
+                                animate(
+                                    initialValue = pull.floatValue,
+                                    targetValue = 0f,
+                                    animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                                ) { value, _ ->
+                                    pull.floatValue = value.coerceAtLeast(0f)
+                                }
+                            }
+                        }
+                    }
+
+                    detectVerticalDragGestures(
+                        onDragStart = { rebound?.cancel() },
+                        onDragEnd = { release(allowRefresh = true) },
+                        onDragCancel = { release(allowRefresh = false) },
+                    ) { _, delta ->
+                        if (!updating) {
+                            pull.floatValue = (pull.floatValue + delta * .55f).coerceIn(0f, maxPullPx)
+                        }
+                    }
+                }
+            },
+    ) {
+        Box(
+            Modifier.align(Alignment.TopCenter).height(HeaderMaxPull).clipToBounds(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Default.Refresh,
+                contentDescription = null,
+                modifier = Modifier.size(22.dp).graphicsLayer {
+                    val distance = pull.floatValue
+                    val progress = (distance / thresholdPx).coerceIn(0f, 1f)
+                    alpha = progress
+                    translationY = (distance - maxPullPx) / 2f
+                    rotationZ = 180f * progress
+                },
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        }
+        // Keep the header's measured height fixed so pulling never remeasures the map.
+        Box(Modifier.graphicsLayer { translationY = pull.floatValue }) {
+            content()
         }
     }
 }

@@ -69,10 +69,8 @@ import androidx.compose.ui.unit.dp
 import com.rton.howstheweather.domain.AirQualityObservation
 import com.rton.howstheweather.domain.AreaForecast
 import com.rton.howstheweather.domain.AreaForecastPeriod
-import com.rton.howstheweather.domain.ClothingAdvisor
 import com.rton.howstheweather.domain.ClothingWindow
 import com.rton.howstheweather.domain.HomeUiState
-import com.rton.howstheweather.domain.RainState
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
@@ -82,7 +80,6 @@ import kotlin.math.max
 
 private const val NOTABLE_RAIN_CHANCE_PERCENT = 30
 private const val OUTLOOK_PERIOD_COUNT = 4
-private val RAINING_STATES = setOf(RainState.LIGHT, RainState.MODERATE, RainState.HEAVY, RainState.EXTREME)
 
 @Composable
 private fun rememberUpcomingPeriods(areaForecast: AreaForecast?, now: Instant): List<AreaForecastPeriod> =
@@ -101,25 +98,7 @@ fun SummaryScreen(
     val zone = remember { ZoneId.of("Asia/Taipei") }
     val now = remember(state.areaForecast, state.weeklyForecast) { Instant.now() }
     val upcomingPeriods = rememberUpcomingPeriods(state.areaForecast, now)
-    val rainingNow = state.decision.state in RAINING_STATES
-    val clothingAdvice = remember(
-        state.areaForecast,
-        state.weeklyForecast,
-        state.clothingTolerance,
-        state.clothingWindow,
-        now,
-        rainingNow,
-    ) {
-        ClothingAdvisor.advise(
-            forecast = state.areaForecast,
-            weekly = state.weeklyForecast,
-            tolerance = state.clothingTolerance,
-            now = now,
-            zone = zone,
-            rainingNow = rainingNow,
-            window = state.clothingWindow.duration,
-        )
-    }
+    val clothingAdvice = rememberClothingAdvice(state, now, zone)
 
     Column(
         modifier

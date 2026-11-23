@@ -94,9 +94,13 @@ import com.rton.howstheweather.domain.ClothingAdvice
 import com.rton.howstheweather.domain.ClothingAdvisor
 import com.rton.howstheweather.domain.ClothingWindow
 import com.rton.howstheweather.domain.HatAdvice
+import com.rton.howstheweather.domain.HomeUiState
 import com.rton.howstheweather.domain.OuterWear
 import com.rton.howstheweather.domain.RainGear
+import com.rton.howstheweather.domain.RainState
 import com.rton.howstheweather.domain.TopWear
+import java.time.Instant
+import java.time.ZoneId
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -105,6 +109,7 @@ private val NeutralMid = Color(0xFF3FB6A8)
 private val WarmEnd = Color(0xFFE8763A)
 private val ThermalDarkTint = Color(0xFFF28B4E)
 private val ThermalLightTint = Color(0xFFD96528)
+private val RAINING_STATES = setOf(RainState.LIGHT, RainState.MODERATE, RainState.HEAVY, RainState.EXTREME)
 
 private val WINDOW_CAPSULE_TOUCH_HEIGHT = 48.dp
 private val WINDOW_CAPSULE_TRACK_HEIGHT = 26.dp
@@ -113,6 +118,64 @@ private val WINDOW_CAPSULE_PILL_H_PAD = 6.dp
 private val WINDOW_CAPSULE_TEXT_GAP = 9.dp
 private val WINDOW_CAPSULE_FLING_THRESHOLD = 400.dp // per second
 private val WindowCapsuleSettleSpring = spring<Float>(dampingRatio = 0.82f, stiffness = 520f)
+
+@Composable
+internal fun rememberClothingAdvice(state: HomeUiState, now: Instant, zone: ZoneId): ClothingAdvice? {
+    val rainingNow = state.decision.state in RAINING_STATES
+    return remember(
+        state.areaForecast,
+        state.weeklyForecast,
+        state.clothingTolerance,
+        state.clothingWindow,
+        now,
+        zone,
+        rainingNow,
+    ) {
+        ClothingAdvisor.advise(
+            forecast = state.areaForecast,
+            weekly = state.weeklyForecast,
+            tolerance = state.clothingTolerance,
+            now = now,
+            zone = zone,
+            rainingNow = rainingNow,
+            window = state.clothingWindow.duration,
+        )
+    }
+}
+
+@Composable
+internal fun ClothingAdviceIcons(advice: ClothingAdvice, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val recommended = colors.primary
+    val optional = colors.onSurfaceVariant
+    val umbrellaLabel = rainGearLabel(advice.rainGear)
+    Row(
+        modifier = modifier.clearAndSetSemantics {
+            contentDescription = "穿衣建議，上衣：${topLabel(advice.top)}，外套：${outerLabel(advice.outer)}，" +
+                "褲子：${bottomLabel(advice.bottom)}，帽子：${hatLabel(advice.hat)}" +
+                if (umbrellaLabel != null) "，$umbrellaLabel" else ""
+        },
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Canvas(Modifier.size(26.dp)) { drawTop(advice.top, recommended) }
+        Canvas(Modifier.size(26.dp)) {
+            drawOuter(advice.outer, if (advice.outer == OuterWear.NONE) optional else recommended)
+        }
+        Canvas(Modifier.size(26.dp)) { drawBottom(advice.bottom, recommended) }
+        Canvas(Modifier.size(26.dp)) {
+            drawHat(advice.hat, if (advice.hat == HatAdvice.NONE) optional else recommended)
+        }
+        if (umbrellaLabel != null) {
+            Icon(
+                Icons.Default.Umbrella,
+                contentDescription = null,
+                modifier = Modifier.padding(start = 8.dp).size(16.dp),
+                tint = recommended,
+            )
+        }
+    }
+}
 
 /**
  * Three-segment sliding capsule for switching the clothing forecast horizon
@@ -645,12 +708,14 @@ private fun hatDetail(advice: ClothingAdvice): String? = when (advice.hat) {
     else -> null
 }
 
+private fun rainGearLabel(rainGear: RainGear): String? = when (rainGear) {
+    RainGear.UMBRELLA -> "帶傘"
+    RainGear.FOLDING_UMBRELLA -> "可帶折傘"
+    RainGear.NONE -> null
+}
+
 private fun adviceNotes(advice: ClothingAdvice): List<Pair<ImageVector, String>> = buildList {
-    when (advice.rainGear) {
-        RainGear.UMBRELLA -> add(Icons.Default.Umbrella to "帶傘")
-        RainGear.FOLDING_UMBRELLA -> add(Icons.Default.Umbrella to "可帶折傘")
-        RainGear.NONE -> Unit
-    }
+    rainGearLabel(advice.rainGear)?.let { add(Icons.Default.Umbrella to it) }
     if (advice.dampChill) add(Icons.Default.AcUnit to "濕冷，體感再低一些")
 }
 
