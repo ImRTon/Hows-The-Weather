@@ -1,29 +1,19 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-
 package com.rton.howstheweather.ui
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -37,9 +27,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rton.howstheweather.HomeViewModel
 import com.rton.howstheweather.domain.HomeUiState
+import com.rton.howstheweather.domain.WeatherGrid
 import com.rton.howstheweather.domain.WeatherUnit
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
 
 @Composable
@@ -48,23 +37,12 @@ internal fun QuantitativePrecipitationControls(
     viewModel: HomeViewModel,
     locating: Boolean,
     onLocate: () -> Unit,
-    cameraZoom: () -> Float,
     modifier: Modifier = Modifier,
 ) {
-    val grid = state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
-    val streetLevel by remember { derivedStateOf { cameraZoom() >= 11f } }
-    val summaryHeight = remember { mutableIntStateOf(0) }
     val legendHeight = remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
     val bottomTouchOverhangPx = with(density) { QUANTITATIVE_BAR_TOUCH_OVERHANG.roundToPx() }
     Box(modifier) {
-        QuantitativeRainSummary(
-            state = state,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .onSizeChanged { summaryHeight.intValue = it.height }
-                .padding(12.dp),
-        )
         QuantitativeRainLegend(
             selectedIndex = state.quantitativeForecastIndex,
             onSelectedIndex = viewModel::setQuantitativeForecastIndex,
@@ -76,68 +54,65 @@ internal fun QuantitativePrecipitationControls(
                 },
         )
         MapEndActions(
-            topControlsHeightPx = { summaryHeight.intValue },
+            topControlsHeightPx = { 0 },
             bottomControlsHeightPx = { legendHeight.intValue },
             locating = locating,
             onLocate = onLocate,
         )
-        AnimatedVisibility(
-            visible = grid != null && streetLevel,
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 108.dp),
-        ) {
-            Text(
-                "原始格點約 ${grid?.resolutionKm?.let { "%.2f".format(it) } ?: "—"} km",
-                modifier = Modifier
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = .92f), RoundedCornerShape(8.dp))
-                    .padding(8.dp),
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
     }
 }
 
 @Composable
-private fun QuantitativeRainSummary(state: HomeUiState, modifier: Modifier = Modifier) {
-    val grid = state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
-    val formatter = remember {
-        DateTimeFormatter.ofPattern("M/d HH:mm").withZone(ZoneId.of("Asia/Taipei"))
+internal fun QuantitativePrecipitationHeader(state: HomeUiState, grid: WeatherGrid?) {
+    val index = state.quantitativeForecastIndex
+    val title = when (grid?.unit) {
+        WeatherUnit.MILLIMETERS_ONE_HOUR -> "未來 1 小時 · 累積預報"
+        WeatherUnit.MILLIMETERS_PER_HOUR -> "即時雨率"
+        else -> "未來 ${index * 12}–${(index + 1) * 12} 小時 · 累積預報"
+    }
+    val unitLabel = when (grid?.unit) {
+        WeatherUnit.MILLIMETERS_ONE_HOUR -> "mm/1h"
+        WeatherUnit.MILLIMETERS_PER_HOUR -> "mm/h"
+        else -> "mm/12h"
     }
     val sampled = grid?.sample(state.target.coordinate)
-    val amountLabel = when (grid?.unit) {
-        WeatherUnit.MILLIMETERS_ONE_HOUR -> sampled?.let { "%.1f mm/1h".format(it) } ?: "此點無有效值"
-        WeatherUnit.MILLIMETERS_PER_HOUR -> sampled?.let { "%.1f mm/h".format(it) } ?: "此點無有效值"
-        WeatherUnit.MILLIMETERS_TWELVE_HOURS -> sampled?.let { "%.1f mm/12h".format(it) } ?: "此點無有效值"
-        else -> "載入中"
+    val amount = when {
+        sampled != null -> "%.1f %s".format(sampled, unitLabel)
+        grid != null -> "此位置無雨量資料"
+        state.isUpdating -> "載入中"
+        else -> "暫無資料"
     }
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = .94f),
+    val colors = MaterialTheme.colorScheme
+    val typography = MaterialTheme.typography
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.WaterDrop, null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    when (grid?.unit) {
-                        WeatherUnit.MILLIMETERS_ONE_HOUR -> "未來 1 小時 · 累積預報"
-                        WeatherUnit.MILLIMETERS_PER_HOUR -> "即時雨率"
-                        WeatherUnit.MILLIMETERS_TWELVE_HOURS -> {
-                            val startHour = state.quantitativeForecastIndex * 12
-                            "未來 $startHour–${startHour + 12} 小時 · 累積預報"
-                        }
-                        else -> "0–48 小時定量降水載入中"
-                    },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    grid?.let { "${formatter.format(it.validAt)} · ${it.sourceId}" } ?: "等待數值格點",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Text(
+            text = title,
+            modifier = Modifier.weight(1f),
+            style = typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (sampled != null) {
+                Icon(
+                    Icons.Default.WaterDrop,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                    tint = colors.primary,
                 )
             }
-            Text(amountLabel, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text(
+                text = amount,
+                style = typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                fontWeight = FontWeight.SemiBold,
+                color = if (sampled != null) colors.primary else colors.onSurfaceVariant,
+            )
         }
     }
 }

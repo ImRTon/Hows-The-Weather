@@ -131,6 +131,7 @@ import kotlin.math.sin
 @Composable
 fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
+    val refreshPull = remember(state.destination) { mutableFloatStateOf(0f) }
     LaunchedEffect(state.message) {
         state.message?.let {
             snackbarHostState.showSnackbar(
@@ -144,7 +145,7 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = { AppTopBar(state, viewModel) },
+        topBar = { AppTopBar(state, viewModel, refreshPull) },
         bottomBar = { WeatherNavigationBar(state.destination, viewModel::selectDestination) },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
@@ -163,6 +164,7 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
             AppDestination.PRECIPITATION -> WeatherWorkspace(
                 state = state,
                 viewModel = viewModel,
+                refreshPull = refreshPull,
                 modifier = Modifier.padding(padding).fillMaxSize(),
             )
         }
@@ -193,16 +195,17 @@ private fun WeatherNavigationBar(
 }
 
 @Composable
-private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
+private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel, refreshPull: MutableFloatState) {
     val formatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()) }
     val isNow = state.destination == AppDestination.NOW
+    val isPrecipitation = state.destination == AppDestination.PRECIPITATION
+    val precipitationGrid = if (isPrecipitation) {
+        state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)
+    } else null
     val timeContext = when (state.destination) {
         AppDestination.SUMMARY -> "天氣概況 · 穿搭 · 空氣品質"
         AppDestination.FORECAST -> "逐 3 小時 · 本週日夜"
-        AppDestination.PRECIPITATION -> {
-            val startHour = state.quantitativeForecastIndex * 12
-            "未來 $startHour–${startHour + 12} 小時 · 累積預報"
-        }
+        AppDestination.PRECIPITATION -> null
         AppDestination.NOW -> when {
             state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> "未來 1 小時 · 累積預報"
             state.selectedMinute < 0 && state.activeGrid?.unit == WeatherUnit.LUMINANCE ->
@@ -212,18 +215,25 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
             else -> "現在 · 雷達觀測"
         }
     }
+    val subtitle = if (isPrecipitation) {
+        val publicationFormatter = remember {
+            DateTimeFormatter.ofPattern("M/d HH:mm").withZone(ZoneId.of("Asia/Taipei"))
+        }
+        precipitationGrid?.let { "發布 ${publicationFormatter.format(it.validAt)}" }
+    } else {
+        timeContext?.let { "$it · 資料 ${formatter.format(state.activeGrid?.validAt ?: state.decision.issuedAt)}" }
+    }
+    val growHeader = isNow || isPrecipitation
     val surface = MaterialTheme.colorScheme.surface
     val header: @Composable () -> Unit = {
         Column(Modifier.background(surface)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .then(if (isNow) Modifier.heightIn(min = 48.dp) else Modifier.height(48.dp))
+                    .then(if (growHeader) Modifier.heightIn(min = 48.dp) else Modifier.height(48.dp))
                     .padding(
                         start = 16.dp,
                         end = if (isNow) 12.dp else 0.dp,
-                        top = if (isNow) 4.dp else 0.dp,
-                        bottom = if (isNow) 4.dp else 0.dp,
                     ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -235,7 +245,7 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
                 )
                 Spacer(Modifier.width(8.dp))
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).padding(vertical = if (growHeader) 4.dp else 0.dp),
                     verticalArrangement = Arrangement.Center,
                 ) {
                     Text(
@@ -245,31 +255,36 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        "$timeContext · 資料 ${formatter.format(
-                            if (state.destination == AppDestination.PRECIPITATION) {
-                                state.quantitativeForecastFrames.getOrNull(state.quantitativeForecastIndex)?.validAt
-                                    ?: state.decision.issuedAt
-                            } else {
-                                state.activeGrid?.validAt ?: state.decision.issuedAt
-                            },
-                        )}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (state.decision.isStale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = if (isNow) 2 else 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    if (subtitle != null) {
+                        Text(
+                            subtitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (!isPrecipitation && state.decision.isStale) {
+                                MaterialTheme.colorScheme.error
+                            } else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = if (growHeader) 2 else 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 if (isNow) {
                     val now = remember(state.areaForecast, state.weeklyForecast) { Instant.now() }
                     val zone = remember { ZoneId.of("Asia/Taipei") }
-                    rememberClothingAdvice(state, now, zone)?.let { advice ->
-                        ClothingAdviceIcons(advice, Modifier.padding(start = 8.dp))
+                    if (state.areaForecast != null) {
+                        HeaderClothingAdvice(
+                            advice = rememberClothingAdvice(state, now, zone),
+                            selected = state.clothingWindow,
+                            onSelect = viewModel::setClothingWindow,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
                     }
                 } else {
                     IconButton(onClick = viewModel::refresh) { Icon(Icons.Default.Refresh, "重新整理") }
                     IconButton(onClick = viewModel::cycleTheme) { Icon(Icons.Default.Contrast, "切換亮暗主題") }
                 }
+            }
+            if (isPrecipitation) {
+                QuantitativePrecipitationHeader(state, precipitationGrid)
             }
             Box(Modifier.fillMaxWidth().height(2.dp)) {
                 if (state.isUpdating || state.isHistoryLoading) {
@@ -297,7 +312,7 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel) {
             .windowInsetsPadding(WindowInsets.statusBars),
     ) {
         if (isNow) {
-            NowPullToRefreshHeader(state.isUpdating, viewModel::refresh, header)
+            NowPullToRefreshHeader(refreshPull, state.isUpdating, viewModel::refresh, header)
         } else {
             header()
         }
@@ -309,11 +324,11 @@ private val HeaderMaxPull = 48.dp
 
 @Composable
 private fun NowPullToRefreshHeader(
+    pull: MutableFloatState,
     isUpdating: Boolean,
     onRefresh: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    val pull = remember { mutableFloatStateOf(0f) }
     val updating by rememberUpdatedState(isUpdating)
     val refresh by rememberUpdatedState(onRefresh)
     val density = LocalDensity.current
@@ -391,6 +406,7 @@ private fun NowPullToRefreshHeader(
 private fun WeatherWorkspace(
     state: HomeUiState,
     viewModel: HomeViewModel,
+    refreshPull: FloatState,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier) {
@@ -540,58 +556,61 @@ private fun WeatherWorkspace(
         Box(Modifier.fillMaxSize()) {
             PersistentWeatherMap(state, viewModel, mapModifier)
             if (state.destination == AppDestination.NOW) {
-                DecisionPanel(
-                    state = state,
-                    anchors = anchors,
-                    panelHeight = displayedHeight,
-                    onHeaderMeasured = { headerPx = it },
-                    onPriorityMeasured = { priorityPx = it },
-                    onExpandedMeasured = { expandedPx = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .layout { measurable, constraints ->
-                            val height = displayedHeight().roundToInt().coerceIn(0, constraints.maxHeight)
-                            val placeable = measurable.measure(
-                                constraints.copy(minHeight = height, maxHeight = height),
-                            )
-                            layout(placeable.width, height) { placeable.place(0, 0) }
-                        }
-                        .then(panelDrag),
-                )
-                // The divider doubles as the primary-layer rail: vertical drags resize
-                // the panels, taps and horizontal swipes switch the layer.
-                MapLayerRail(
-                    selected = state.layers.primary,
-                    radarCoverage = state.radarCoverage,
-                    radarLoading = state.radarRegionalLoading,
-                    onSelect = viewModel::setPrimaryLayer,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(dividerHeight)
-                        .offset { IntOffset(0, displayedHeight().roundToInt()) }
-                        .zIndex(1f)
-                        .then(panelDrag),
-                )
-                PanelHandle(
-                    anchor = state.panelAnchor,
-                    interactionSource = dragInteraction,
-                    onClick = {
-                        userMovedPanel = true
-                        viewModel.cyclePanel()
-                    },
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .width(96.dp)
-                        .height(PANEL_HANDLE_TOUCH_HEIGHT)
-                        .offset {
-                            // The touch target starts where the segment row ends and
-                            // reaches down into the map, never over the segments.
-                            val y = displayedHeight() + handleStripPx
-                            IntOffset(0, y.coerceIn(0f, bounds.maxHandleTouchOffset).roundToInt())
-                        }
-                        .zIndex(2f)
-                        .then(panelDrag),
-                )
+                // Follow the header in the draw phase so the map keeps its viewport.
+                Box(Modifier.matchParentSize().graphicsLayer { translationY = refreshPull.floatValue }) {
+                    DecisionPanel(
+                        state = state,
+                        anchors = anchors,
+                        panelHeight = displayedHeight,
+                        onHeaderMeasured = { headerPx = it },
+                        onPriorityMeasured = { priorityPx = it },
+                        onExpandedMeasured = { expandedPx = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .layout { measurable, constraints ->
+                                val height = displayedHeight().roundToInt().coerceIn(0, constraints.maxHeight)
+                                val placeable = measurable.measure(
+                                    constraints.copy(minHeight = height, maxHeight = height),
+                                )
+                                layout(placeable.width, height) { placeable.place(0, 0) }
+                            }
+                            .then(panelDrag),
+                    )
+                    // The divider doubles as the primary-layer rail: vertical drags resize
+                    // the panels, taps and horizontal swipes switch the layer.
+                    MapLayerRail(
+                        selected = state.layers.primary,
+                        radarCoverage = state.radarCoverage,
+                        radarLoading = state.radarRegionalLoading,
+                        onSelect = viewModel::setPrimaryLayer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(dividerHeight)
+                            .offset { IntOffset(0, displayedHeight().roundToInt()) }
+                            .zIndex(1f)
+                            .then(panelDrag),
+                    )
+                    PanelHandle(
+                        anchor = state.panelAnchor,
+                        interactionSource = dragInteraction,
+                        onClick = {
+                            userMovedPanel = true
+                            viewModel.cyclePanel()
+                        },
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .width(96.dp)
+                            .height(PANEL_HANDLE_TOUCH_HEIGHT)
+                            .offset {
+                                // The touch target starts where the segment row ends and
+                                // reaches down into the map, never over the segments.
+                                val y = displayedHeight() + handleStripPx
+                                IntOffset(0, y.coerceIn(0f, bounds.maxHandleTouchOffset).roundToInt())
+                            }
+                            .zIndex(2f)
+                            .then(panelDrag),
+                    )
+                }
             }
         }
     }
@@ -1891,7 +1910,6 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 viewModel = viewModel,
                 locating = locating,
                 onLocate = locateOrRequestPermission,
-                cameraZoom = { mapCamera.position.zoom },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -2205,7 +2223,7 @@ private fun TyphoonCenterButton(onClick: () -> Unit) {
 private val MAP_ACTION_MARGIN = 12.dp
 internal const val OVERLAY_TOOLBAR_AUTO_COLLAPSE_MILLIS = 3_000L
 
-internal class OverlayToolbarAutoCollapseState {
+internal class AutoCollapseState {
     var expanded by mutableStateOf(false)
         private set
     var interactionGeneration by mutableIntStateOf(0)
@@ -2222,6 +2240,11 @@ internal class OverlayToolbarAutoCollapseState {
         interactionGeneration++
     }
 
+    fun collapse() {
+        expanded = false
+        pointerPressed = false
+    }
+
     fun onPointerActivity(pressed: Boolean) {
         if (!expanded) return
         pointerPressed = pressed
@@ -2235,7 +2258,31 @@ internal class OverlayToolbarAutoCollapseState {
 
     fun onTimeout() {
         if (!pointerPressed) {
-            expanded = false
+            collapse()
+        }
+    }
+}
+
+@Composable
+internal fun rememberAutoCollapseState(timeoutMillis: Long): AutoCollapseState {
+    val state = remember { AutoCollapseState() }
+    val generation = state.interactionGeneration
+    LaunchedEffect(state.expanded, generation, state.pointerPressed, timeoutMillis) {
+        if (state.shouldRunAutoCollapseTimer) {
+            delay(timeoutMillis)
+            if (state.interactionGeneration == generation) {
+                state.onTimeout()
+            }
+        }
+    }
+    return state
+}
+
+internal fun Modifier.trackAutoCollapseInteraction(state: AutoCollapseState): Modifier = pointerInput(state) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            state.onPointerActivity(pressed = event.changes.any { it.pressed })
         }
     }
 }
@@ -2252,17 +2299,7 @@ private fun MapOverlayToolbar(
     onTyphoonToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val toolbarState = remember { OverlayToolbarAutoCollapseState() }
-    LaunchedEffect(
-        toolbarState.expanded,
-        toolbarState.interactionGeneration,
-        toolbarState.pointerPressed,
-    ) {
-        if (toolbarState.shouldRunAutoCollapseTimer) {
-            delay(OVERLAY_TOOLBAR_AUTO_COLLAPSE_MILLIS)
-            toolbarState.onTimeout()
-        }
-    }
+    val toolbarState = rememberAutoCollapseState(OVERLAY_TOOLBAR_AUTO_COLLAPSE_MILLIS)
     val hasActiveOverlay = state.layers.windEnabled ||
         (state.tropicalCyclones.isNotEmpty() && state.layers.typhoonEnabled) ||
         state.legendExpanded
@@ -2277,15 +2314,7 @@ private fun MapOverlayToolbar(
         label = "overlay-toolbar-expand",
     )
     Surface(
-        modifier = modifier
-            .pointerInput(toolbarState) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        toolbarState.onPointerActivity(pressed = event.changes.any { it.pressed })
-                    }
-                }
-            },
+        modifier = modifier.trackAutoCollapseInteraction(toolbarState),
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = .94f),
         tonalElevation = 2.dp,

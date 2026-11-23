@@ -12,6 +12,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -32,6 +33,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +41,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Umbrella
 import androidx.compose.material.icons.filled.AcUnit
+import androidx.compose.material.icons.filled.Checkroom
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -59,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -76,6 +80,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -89,6 +94,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.rton.howstheweather.domain.BottomWear
 import com.rton.howstheweather.domain.ClothingAdvice
 import com.rton.howstheweather.domain.ClothingAdvisor
@@ -117,6 +124,7 @@ private val WINDOW_CAPSULE_INSET = 2.dp
 private val WINDOW_CAPSULE_PILL_H_PAD = 6.dp
 private val WINDOW_CAPSULE_TEXT_GAP = 9.dp
 private val WINDOW_CAPSULE_FLING_THRESHOLD = 400.dp // per second
+private const val CLOTHING_WINDOW_POPUP_TIMEOUT_MILLIS = 5_000L
 private val WindowCapsuleSettleSpring = spring<Float>(dampingRatio = 0.82f, stiffness = 520f)
 
 @Composable
@@ -144,35 +152,95 @@ internal fun rememberClothingAdvice(state: HomeUiState, now: Instant, zone: Zone
 }
 
 @Composable
-internal fun ClothingAdviceIcons(advice: ClothingAdvice, modifier: Modifier = Modifier) {
+internal fun HeaderClothingAdvice(
+    advice: ClothingAdvice?,
+    selected: ClothingWindow,
+    onSelect: (ClothingWindow) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val popupState = rememberAutoCollapseState(CLOTHING_WINDOW_POPUP_TIMEOUT_MILLIS)
+    Box(modifier) {
+        Box(
+            modifier = Modifier
+                .height(WINDOW_CAPSULE_TOUCH_HEIGHT)
+                .widthIn(min = WINDOW_CAPSULE_TOUCH_HEIGHT)
+                .clip(CircleShape)
+                .clickable(onClickLabel = "切換穿衣建議時段", role = Role.Button, onClick = popupState::expand)
+                .semantics { stateDescription = "未來 ${selected.hours} 小時" },
+            contentAlignment = Alignment.Center,
+        ) {
+            if (advice != null) {
+                ClothingAdviceIcons(advice)
+            } else {
+                Icon(
+                    Icons.Default.Checkroom,
+                    contentDescription = "這個時段暫無穿衣建議",
+                    modifier = Modifier.size(22.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (popupState.expanded) {
+            val offset = with(LocalDensity.current) {
+                IntOffset(x = 0, y = (WINDOW_CAPSULE_TOUCH_HEIGHT + 4.dp).roundToPx())
+            }
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = offset,
+                onDismissRequest = popupState::collapse,
+                properties = PopupProperties(focusable = true),
+            ) {
+                ClothingWindowCapsule(
+                    selected = selected,
+                    onSelect = { window ->
+                        popupState.onAction()
+                        onSelect(window)
+                    },
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .trackAutoCollapseInteraction(popupState)
+                        .onPreviewKeyEvent {
+                            popupState.onAction()
+                            false
+                        },
+                    floating = true,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClothingAdviceIcons(advice: ClothingAdvice) {
     val colors = MaterialTheme.colorScheme
     val recommended = colors.primary
     val optional = colors.onSurfaceVariant
     val umbrellaLabel = rainGearLabel(advice.rainGear)
+    val garmentSize = 22.dp
     Row(
-        modifier = modifier.clearAndSetSemantics {
-            contentDescription = "穿衣建議，上衣：${topLabel(advice.top)}，外套：${outerLabel(advice.outer)}，" +
-                "褲子：${bottomLabel(advice.bottom)}，帽子：${hatLabel(advice.hat)}" +
-                if (umbrellaLabel != null) "，$umbrellaLabel" else ""
+        modifier = Modifier.clearAndSetSemantics {
+            val umbrellaDescription = umbrellaLabel?.let { "$it，" }.orEmpty()
+            contentDescription = "${umbrellaDescription}穿衣建議，上衣：${topLabel(advice.top)}，" +
+                "外套：${outerLabel(advice.outer)}，褲子：${bottomLabel(advice.bottom)}，帽子：${hatLabel(advice.hat)}"
         },
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Canvas(Modifier.size(26.dp)) { drawTop(advice.top, recommended) }
-        Canvas(Modifier.size(26.dp)) {
-            drawOuter(advice.outer, if (advice.outer == OuterWear.NONE) optional else recommended)
-        }
-        Canvas(Modifier.size(26.dp)) { drawBottom(advice.bottom, recommended) }
-        Canvas(Modifier.size(26.dp)) {
-            drawHat(advice.hat, if (advice.hat == HatAdvice.NONE) optional else recommended)
-        }
         if (umbrellaLabel != null) {
             Icon(
                 Icons.Default.Umbrella,
                 contentDescription = null,
-                modifier = Modifier.padding(start = 8.dp).size(16.dp),
+                modifier = Modifier.padding(end = 12.dp).size(16.dp),
                 tint = recommended,
             )
+        }
+        Canvas(Modifier.size(garmentSize)) { drawTop(advice.top, recommended) }
+        Canvas(Modifier.size(garmentSize)) {
+            drawOuter(advice.outer, if (advice.outer == OuterWear.NONE) optional else recommended)
+        }
+        Canvas(Modifier.size(garmentSize)) { drawBottom(advice.bottom, recommended) }
+        Canvas(Modifier.size(garmentSize)) {
+            drawHat(advice.hat, if (advice.hat == HatAdvice.NONE) optional else recommended)
         }
     }
 }
@@ -186,6 +254,7 @@ internal fun ClothingWindowCapsule(
     selected: ClothingWindow,
     onSelect: (ClothingWindow) -> Unit,
     modifier: Modifier = Modifier,
+    floating: Boolean = false,
 ) {
     val windows = ClothingWindow.entries
     val haptics = LocalHapticFeedback.current
@@ -229,8 +298,11 @@ internal fun ClothingWindowCapsule(
         }
     }
 
-    val trackColor = MaterialTheme.colorScheme.surfaceVariant
-    val indicatorColor = MaterialTheme.colorScheme.primaryContainer
+    val colors = MaterialTheme.colorScheme
+    val trackColor = colors.surfaceVariant
+    val indicatorColor = if (floating) colors.surface else colors.primaryContainer
+    val activeTextColor = if (floating) colors.primary else colors.onSurface
+    val trackShape = if (floating) Modifier.shadow(3.dp, CircleShape) else Modifier.clip(CircleShape)
     Layout(
         modifier = modifier
             .selectableGroup()
@@ -263,7 +335,7 @@ internal fun ClothingWindowCapsule(
                 },
             ),
         content = {
-            Box(Modifier.clip(CircleShape).background(trackColor))
+            Box(trackShape.background(trackColor))
             Box(Modifier.clip(CircleShape).background(indicatorColor))
             windows.forEach { window ->
                 val emphasis = (1f - abs(position.floatValue - window.ordinal)).coerceIn(0f, 1f)
@@ -271,6 +343,7 @@ internal fun ClothingWindowCapsule(
                     window = window,
                     selected = window == selected,
                     emphasis = emphasis,
+                    activeTextColor = activeTextColor,
                     onClick = {
                         if (window != currentSelected) {
                             haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
@@ -334,13 +407,13 @@ private fun ClothingWindowSegment(
     window: ClothingWindow,
     selected: Boolean,
     emphasis: Float,
+    activeTextColor: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val idle = MaterialTheme.colorScheme.onSurfaceVariant
-    val active = MaterialTheme.colorScheme.onSurface
-    val textColor = lerp(idle, active, emphasis)
+    val textColor = lerp(idle, activeTextColor, emphasis)
     Box(
         modifier = modifier
             .selectable(

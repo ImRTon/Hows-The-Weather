@@ -8,7 +8,7 @@ import org.junit.Test
 class OverlayToolbarAutoCollapseTest {
     @Test
     fun `starts collapsed without running timer`() {
-        val state = OverlayToolbarAutoCollapseState()
+        val state = AutoCollapseState()
 
         assertFalse(state.expanded)
         assertFalse(state.shouldRunAutoCollapseTimer)
@@ -16,7 +16,7 @@ class OverlayToolbarAutoCollapseTest {
 
     @Test
     fun `expanding starts auto collapse timer and timeout collapses when idle`() {
-        val state = OverlayToolbarAutoCollapseState()
+        val state = AutoCollapseState()
 
         state.expand()
         assertTrue(state.expanded)
@@ -29,7 +29,7 @@ class OverlayToolbarAutoCollapseTest {
 
     @Test
     fun `active pointer pauses timer and release restarts countdown generation`() {
-        val state = OverlayToolbarAutoCollapseState()
+        val state = AutoCollapseState()
         state.expand()
         val initialGeneration = state.interactionGeneration
 
@@ -52,7 +52,7 @@ class OverlayToolbarAutoCollapseTest {
 
     @Test
     fun `toggle action bumps generation to reset auto collapse timer`() {
-        val state = OverlayToolbarAutoCollapseState()
+        val state = AutoCollapseState()
         state.expand()
         val generationAfterExpand = state.interactionGeneration
 
