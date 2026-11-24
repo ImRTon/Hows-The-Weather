@@ -223,7 +223,6 @@ private fun LayerSegments(
                 .draggable(
                     state = dragState,
                     orientation = Orientation.Horizontal,
-                    reverseDirection = true,
                     onDragStarted = {
                         dragging = true
                         dragStartIndex = currentSelected.ordinal
