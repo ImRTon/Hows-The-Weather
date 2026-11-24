@@ -19,8 +19,15 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 
+data class AirQualitySnapshot(
+    val nearest: AirQualityObservation?,
+    val stations: List<AirQualityObservation>,
+)
+
 interface AirQualityDataSource {
     suspend fun loadNearest(target: GeoPoint): AirQualityObservation?
+    suspend fun loadSnapshot(target: GeoPoint): AirQualitySnapshot =
+        AirQualitySnapshot(nearest = loadNearest(target), stations = emptyList())
 }
 
 class MoenvAirQualityDataSource(
@@ -30,7 +37,10 @@ class MoenvAirQualityDataSource(
 ) : AirQualityDataSource {
     init { require(apiKey.isNotBlank()) }
 
-    override suspend fun loadNearest(target: GeoPoint): AirQualityObservation? = withContext(Dispatchers.IO) {
+    override suspend fun loadNearest(target: GeoPoint): AirQualityObservation? =
+        loadSnapshot(target).nearest
+
+    override suspend fun loadSnapshot(target: GeoPoint): AirQualitySnapshot = withContext(Dispatchers.IO) {
         val url = "https://data.moenv.gov.tw/api/v2/aqx_p_432".toHttpUrl()
             .newBuilder()
             .addQueryParameter("api_key", apiKey)
@@ -40,17 +50,23 @@ class MoenvAirQualityDataSource(
         val response = client.newCall(Request.Builder().url(url).build()).execute()
         response.use {
             check(it.isSuccessful) { "環境部 AQI 回應 ${it.code}" }
-            parser.nearest(it.body.string(), target)
+            parser.snapshot(it.body.string(), target)
         }
     }
 }
 
 class MoenvAirQualityParser {
     fun nearest(json: String, target: GeoPoint): AirQualityObservation? =
-        records(JSONTokener(json).nextValue())
+        snapshot(json, target).nearest
+
+    fun snapshot(json: String, target: GeoPoint): AirQualitySnapshot {
+        val stations = records(JSONTokener(json).nextValue())
             .mapNotNull(::parse)
+        val nearest = stations
             .minByOrNull { distanceKm(target, it.coordinate) }
             ?.takeIf { distanceKm(target, it.coordinate) <= MAX_STATION_DISTANCE_KM }
+        return AirQualitySnapshot(nearest = nearest, stations = stations)
+    }
 
     private fun parse(record: JSONObject): AirQualityObservation? {
         val latitude = record.optString("latitude").toDoubleOrNull() ?: return null

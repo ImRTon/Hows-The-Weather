@@ -404,8 +404,10 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
         val current = snapshot ?: return
         if (regionalRadarJob?.isActive == true) return
         if (!forceRefresh && current.radarRegional != null) return
+        val regionalStale = current.radarRegional == null ||
+            current.radarRegional.validAt.isBefore(current.radar.validAt)
         _uiState.update { state ->
-            state.copy(radarRegionalLoading = current.radarRegional == null)
+            state.copy(radarRegionalLoading = regionalStale)
         }
         regionalRadarJob = viewModelScope.launch {
             try {
@@ -577,7 +579,8 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                 ),
                 cloudCoverage = cloudCoverage,
                 radarCoverage = radarCoverage,
-                radarRegionalLoading = it.radarRegionalLoading && resolved.radarRegional == null,
+                radarRegionalLoading = it.radarRegionalLoading &&
+                    (resolved.radarRegional == null || resolved.radarRegional.validAt.isBefore(resolved.radar.validAt)),
                 windGrid = resolved.windGrid,
                 winds = resolved.winds,
                 windProvenance = resolved.windProvenance,
@@ -677,7 +680,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                     }
                     val weeklyRequest = async { catchingCancellable { source.loadWeeklyForecast(target) } }
                     val airRequest = async {
-                        airQualitySource?.let { source -> catchingCancellable { source.loadNearest(target) } }
+                        airQualitySource?.let { source -> catchingCancellable { source.loadSnapshot(target) } }
                     }
                     val shortResult = shortRequest.await()
                     if (_uiState.value.target.coordinate != target) return@coroutineScope
@@ -718,12 +721,14 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                         emptyMessage = "此位置暫無一週鄉鎮預報",
                         failurePrefix = "一週鄉鎮預報無法載入",
                     )
+                    val airSnapshot = airResult?.getOrNull()
                     _uiState.update { state ->
                         state.copy(
                             weeklyForecast = weeklyForecast,
                             weeklyForecastLoading = false,
                             weeklyForecastUnavailableReason = weeklyFailureReason.takeIf { weeklyForecast == null },
-                            airQuality = airResult?.getOrNull(),
+                            airQuality = airSnapshot?.nearest,
+                            airQualityStations = airSnapshot?.stations.orEmpty(),
                             airQualityLoading = false,
                             airQualityUnavailableReason = when {
                                 airQualitySource == null -> "尚未設定 MOENV_API_KEY"
@@ -735,7 +740,7 @@ class HomeViewModel(application: Application, private val savedStateHandle: Save
                                         ?: "未知錯誤"
                                     "環境部 AQI 無法載入：$detail"
                                 }
-                                airResult?.getOrNull() == null -> "附近沒有可用的 AQI 測站"
+                                airSnapshot?.nearest == null -> "附近沒有可用的 AQI 測站"
                                 else -> null
                             },
                             message = if (retainedWeeklyForecast != null && weeklyFailureReason != null) {

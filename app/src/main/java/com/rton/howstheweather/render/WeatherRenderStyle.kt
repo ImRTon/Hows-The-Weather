@@ -44,7 +44,7 @@ data class WeatherRenderStyle(
         }
         val index = (normalized * 255f).toInt().coerceIn(0, 255)
         val source = colorLut[index]
-        val edgeScale = thresholdEdgeOpacity(value, valueStops)
+        val edgeScale = if (unit == WeatherUnit.AQI) 1f else thresholdEdgeOpacity(value, valueStops)
         return packArgb(
             ((source ushr 24 and 0xff) * opacity * edgeScale).toInt().coerceIn(0, 255),
             source ushr 16 and 0xff,
@@ -110,7 +110,7 @@ data class WeatherRenderStyle(
             opacity = opacity,
         )
 
-        fun cloud(theme: RenderTheme, opacity: Float = 0.62f): WeatherRenderStyle {
+        fun cloud(theme: RenderTheme, opacity: Float = 0.82f): WeatherRenderStyle {
             val positions = floatArrayOf(0.08f, 0.25f, 0.42f, 0.58f, 0.72f, 0.86f, 1f)
             val anchors = CloudEnhancedPalette.colors(theme).mapIndexed { index, color ->
                 ColorAnchor(positions[index], color)
@@ -119,6 +119,57 @@ data class WeatherRenderStyle(
                 theme = theme,
                 unit = WeatherUnit.LUMINANCE,
                 valueStops = floatArrayOf(.08f, .2f, .35f, .5f, .65f, .8f, 1f),
+                colorLut = PerceptualColorLut.create(anchors),
+                contours = floatArrayOf(),
+                opacity = opacity,
+                contourColor = Color.TRANSPARENT,
+            )
+        }
+
+        fun aqi(
+            theme: RenderTheme,
+            opacity: Float = if (theme == RenderTheme.DARK) 0.48f else 0.42f,
+        ): WeatherRenderStyle {
+            // Continuous OKLab anchors tuned so real numerical AQI differences remain visible
+            // within each tier while every official MOENV band (0-50 green, 51-100 yellow, ...)
+            // stays unmistakably true to its tier hue.
+            val anchors = if (theme == RenderTheme.DARK) {
+                listOf(
+                    ColorAnchor(0.00f, 0xFF28BA84.toInt()), // AQI 0: fresh emerald green
+                    ColorAnchor(0.21f, 0xFF4AD47A.toInt()), // AQI ~40: warm true green
+                    ColorAnchor(0.25f, 0xFFA8D64E.toInt()), // AQI 50: green-yellow boundary
+                    ColorAnchor(0.29f, 0xFFF2C94C.toInt()), // AQI ~60: bright moderate yellow
+                    ColorAnchor(0.39f, 0xFFF5AC2E.toInt()), // AQI ~90: warm amber-yellow
+                    ColorAnchor(0.45f, 0xFFFF8833.toInt()), // AQI ~110: orange
+                    ColorAnchor(0.55f, 0xFFFA682E.toInt()), // AQI ~140: deep orange
+                    ColorAnchor(0.61f, 0xFFF54D4D.toInt()), // AQI ~161: red
+                    ColorAnchor(0.69f, 0xFFE03448.toInt()), // AQI ~189: deep crimson
+                    ColorAnchor(0.75f, 0xFFA652E8.toInt()), // AQI ~221: purple
+                    ColorAnchor(0.83f, 0xFF8D38CC.toInt()), // AQI ~278: deep violet
+                    ColorAnchor(0.89f, 0xFF8C1D3B.toInt()), // AQI ~336: maroon
+                    ColorAnchor(1.00f, 0xFF6B122A.toInt()), // AQI 500: dark maroon
+                )
+            } else {
+                listOf(
+                    ColorAnchor(0.00f, 0xFF14946A.toInt()), // AQI 0: fresh emerald green
+                    ColorAnchor(0.21f, 0xFF28A85B.toInt()), // AQI ~40: warm true green
+                    ColorAnchor(0.25f, 0xFF8CB01F.toInt()), // AQI 50: green-yellow boundary
+                    ColorAnchor(0.29f, 0xFFDBA40F.toInt()), // AQI ~60: moderate yellow
+                    ColorAnchor(0.39f, 0xFFD98706.toInt()), // AQI ~90: warm amber-yellow
+                    ColorAnchor(0.45f, 0xFFE06010.toInt()), // AQI ~110: orange
+                    ColorAnchor(0.55f, 0xFFD94A12.toInt()), // AQI ~140: deep orange
+                    ColorAnchor(0.61f, 0xFFD12C2C.toInt()), // AQI ~161: red
+                    ColorAnchor(0.69f, 0xFFB81D2E.toInt()), // AQI ~189: deep crimson
+                    ColorAnchor(0.75f, 0xFF7B2CBF.toInt()), // AQI ~221: purple
+                    ColorAnchor(0.83f, 0xFF631E9E.toInt()), // AQI ~278: deep violet
+                    ColorAnchor(0.89f, 0xFF631028.toInt()), // AQI ~336: maroon
+                    ColorAnchor(1.00f, 0xFF4A0A1D.toInt()), // AQI 500: dark maroon
+                )
+            }
+            return WeatherRenderStyle(
+                theme = theme,
+                unit = WeatherUnit.AQI,
+                valueStops = floatArrayOf(0f, 50f, 100f, 150f, 200f, 300f, 500f),
                 colorLut = PerceptualColorLut.create(anchors),
                 contours = floatArrayOf(),
                 opacity = opacity,
@@ -165,8 +216,11 @@ private fun packArgb(a: Int, r: Int, g: Int, b: Int): Int =
 internal fun cloudOpacity(normalized: Float, opacity: Float): Float {
     val threshold = 0.08f
     val strength = ((normalized - threshold) / (1f - threshold)).coerceIn(0f, 1f)
-    val smooth = strength * strength * (3f - 2f * strength)
-    return smooth * opacity.coerceIn(0f, 1f)
+    if (strength <= 0f) return 0f
+    val ramp = (strength / 0.12f).coerceIn(0f, 1f)
+    val edge = ramp * ramp * (3f - 2f * ramp)
+    val body = 0.35f + 0.65f * strength.pow(0.65f)
+    return edge * body * opacity.coerceIn(0f, 1f)
 }
 
 internal fun thresholdEdgeOpacity(value: Float, stops: FloatArray): Float {

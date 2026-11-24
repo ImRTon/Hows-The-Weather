@@ -37,6 +37,25 @@ class TileBlendWeightsTest {
         assertFalse(cached.rendersSameFrameAs(reloaded.copy(bounds = GeoBounds(21.0, 119.0, 26.0, 123.0))))
     }
 
+    @Test fun `coverage switch between wide and regional radar triggers crossfade`() {
+        val time = Instant.parse("2026-10-02T03:00:00Z")
+        val wide = grid(validAt = time).copy(
+            sourceId = "O-A0058-005",
+            bounds = GeoBounds(17.75, 115.0, 29.25, 126.5),
+        )
+        val regional = grid(validAt = time).copy(
+            sourceId = "O-A0058-006",
+            bounds = GeoBounds(20.5, 118.0, 26.5, 124.0),
+        )
+        val newerWide = wide.copy(validAt = Instant.parse("2026-10-02T03:10:00Z"))
+        val rain = wide.copy(unit = WeatherUnit.MILLIMETERS_ONE_HOUR, sourceId = "F-B0046-001")
+
+        assertTrue(wide.isCoverageTransitionTo(regional))
+        assertTrue(regional.isCoverageTransitionTo(wide))
+        assertFalse(wide.isCoverageTransitionTo(newerWide))
+        assertFalse(wide.isCoverageTransitionTo(rain))
+    }
+
     private fun grid(validAt: Instant) = WeatherGrid(
         width = 2,
         height = 2,

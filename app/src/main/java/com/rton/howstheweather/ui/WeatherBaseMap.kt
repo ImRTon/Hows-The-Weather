@@ -2,7 +2,9 @@ package com.rton.howstheweather.ui
 
 import com.rton.howstheweather.diagnostics.StartupDiagnostics
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -15,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import com.rton.howstheweather.BuildConfig
+import com.rton.howstheweather.domain.GeoBounds
 import com.rton.howstheweather.domain.GeoPoint
 import com.rton.howstheweather.domain.TargetLocation
 import com.rton.howstheweather.render.WeatherTileProvider
@@ -104,6 +107,15 @@ internal data class WeatherTileLayer(
     val visible: Boolean = true,
 )
 
+internal data class WeatherGroundOverlay(
+    val key: String,
+    val bitmap: android.graphics.Bitmap,
+    val bounds: GeoBounds,
+    val transparency: Float = 0f,
+    val zIndex: Float = 2f,
+    val visible: Boolean = true,
+)
+
 @Composable
 internal fun WeatherBaseMap(
     camera: WeatherMapCameraState,
@@ -118,6 +130,8 @@ internal fun WeatherBaseMap(
     onCameraIdle: (MapCameraPosition) -> Unit,
     modifier: Modifier = Modifier,
     typhoon: TyphoonMapLayer? = null,
+    airQualityStations: AirQualityStationLayer? = null,
+    groundOverlays: List<WeatherGroundOverlay> = emptyList(),
 ) {
     // Creating the base map is the most expensive step of startup: Google Maps
     // loads its SDK module on the main thread. Let the decision card draw first,
@@ -136,7 +150,7 @@ internal fun WeatherBaseMap(
         deferredCreation = false
     }
     if (deferredCreation) {
-        Box(modifier)
+        Box(modifier.background(MaterialTheme.colorScheme.background))
         return
     }
     when (configuredMapProvider) {
@@ -152,6 +166,8 @@ internal fun WeatherBaseMap(
             onMapLoaded = onMapLoaded,
             onCameraIdle = onCameraIdle,
             typhoon = typhoon,
+            airQualityStations = airQualityStations,
+            groundOverlays = groundOverlays,
             modifier = modifier,
         )
         MapProvider.OSM -> OsmWeatherMap(
@@ -166,6 +182,8 @@ internal fun WeatherBaseMap(
             onMapLoaded = onMapLoaded,
             onCameraIdle = onCameraIdle,
             typhoon = typhoon,
+            airQualityStations = airQualityStations,
+            groundOverlays = groundOverlays,
             modifier = modifier,
         )
     }

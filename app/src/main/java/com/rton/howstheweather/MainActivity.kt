@@ -1,16 +1,20 @@
 package com.rton.howstheweather
 
+import android.graphics.Color
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.rton.howstheweather.ui.HomeScreen
 import com.rton.howstheweather.ui.theme.WeatherTheme
+import com.rton.howstheweather.ui.theme.isWeatherDarkTheme
 import com.rton.howstheweather.diagnostics.StartupDiagnostics
 import com.rton.howstheweather.widget.WeatherDesktopWidgetProvider
 import com.rton.howstheweather.widget.WidgetHaptics
@@ -49,6 +53,22 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) {
                     WidgetWeatherStore.syncFromUiState(applicationContext, state)
                 }
+            }
+            val darkTheme = isWeatherDarkTheme(state.themePreference)
+            DisposableEffect(darkTheme) {
+                enableEdgeToEdge(
+                    statusBarStyle = if (darkTheme) {
+                        SystemBarStyle.dark(Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                    },
+                    navigationBarStyle = if (darkTheme) {
+                        SystemBarStyle.dark(Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                    },
+                )
+                onDispose {}
             }
             WeatherTheme(state.themePreference) {
                 HomeScreen(state = state, viewModel = viewModel)

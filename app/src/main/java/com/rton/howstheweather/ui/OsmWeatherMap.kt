@@ -90,6 +90,8 @@ internal fun OsmWeatherMap(
     onMapLoaded: () -> Unit,
     onCameraIdle: (MapCameraPosition) -> Unit,
     typhoon: TyphoonMapLayer?,
+    airQualityStations: AirQualityStationLayer? = null,
+    groundOverlays: List<WeatherGroundOverlay> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -105,7 +107,12 @@ internal fun OsmWeatherMap(
     val mapView = remember {
         configureOsmdroid(context)
         MapView(context).apply {
+            setBackgroundColor(loadingColor)
             setTileSource(if (darkMap) darkSource else lightSource)
+            overlayManager.tilesOverlay.apply {
+                loadingBackgroundColor = loadingColor
+                loadingLineColor = loadingColor
+            }
             // Matches the Google Maps convention of a 256 dp world at zoom 0,
             // so zoom thresholds and the wind overlay stay provider-neutral.
             isTilesScaledToDpi = true
@@ -131,6 +138,8 @@ internal fun OsmWeatherMap(
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer()
     val typhoonOverlay = remember(density) { OsmTyphoonOverlay(density, textMeasurer) }
+    val groundBitmapOverlay = remember { OsmGroundBitmapOverlay() }
+    val aqiStationsOverlay = remember(density, mapView) { OsmAirQualityStationsOverlay(density, textMeasurer, mapView) }
     val typhoonGeometries = remember(typhoon?.cyclones) {
         typhoon?.cyclones?.map(::cycloneGeometry).orEmpty()
     }
@@ -219,6 +228,7 @@ internal fun OsmWeatherMap(
     SideEffect {
         val source = if (darkMap) darkSource else lightSource
         if (mapView.tileProvider.tileSource !== source) mapView.setTileSource(source)
+        mapView.setBackgroundColor(loadingColor)
         mapView.overlayManager.tilesOverlay.apply {
             if (loadingBackgroundColor != loadingColor) {
                 loadingBackgroundColor = loadingColor
@@ -232,8 +242,22 @@ internal fun OsmWeatherMap(
             mapView.invalidate()
         }
         weatherOverlays.sync(weatherLayers, insertBefore = marker)
+        if (groundBitmapOverlay.update(groundOverlays)) mapView.invalidate()
+        syncOverlayBeforeMarker(
+            mapView = mapView,
+            overlay = groundBitmapOverlay,
+            attached = groundOverlays.isNotEmpty(),
+            insertBefore = marker,
+        )
         if (typhoonOverlay.update(typhoonGeometries, typhoonPalette, typhoonStyles)) mapView.invalidate()
         syncTyphoonOverlay(mapView, typhoonOverlay, attached = typhoonGeometries.isNotEmpty(), insertBefore = marker)
+        if (aqiStationsOverlay.update(airQualityStations)) mapView.invalidate()
+        syncOverlayBeforeMarker(
+            mapView = mapView,
+            overlay = aqiStationsOverlay,
+            attached = airQualityStations != null && airQualityStations.stations.isNotEmpty(),
+            insertBefore = marker,
+        )
     }
 
     Box(modifier) {
@@ -301,8 +325,197 @@ private class OsmTyphoonOverlay(
     }
 }
 
+/**
+ * Draws a single Web Mercator-aligned [Bitmap] directly inside osmdroid's draw pass so
+ * zooming and panning scale smoothly on the GPU without re-rendering tiles.
+ */
+private class OsmGroundBitmapOverlay : Overlay() {
+    private var overlays: List<WeatherGroundOverlay> = emptyList()
+    private val nwPixel = android.graphics.Point()
+    private val sePixel = android.graphics.Point()
+    private val dstRect = android.graphics.RectF()
+    private val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+
+    fun update(overlays: List<WeatherGroundOverlay>): Boolean {
+        if (this.overlays == overlays) return false
+        this.overlays = overlays
+        return true
+    }
+
+    override fun draw(canvas: android.graphics.Canvas, projection: Projection) {
+        if (overlays.isEmpty()) return
+        overlays.forEach { current ->
+            if (!current.visible || current.transparency >= 0.999f) return@forEach
+            val bounds = current.bounds
+            projection.toPixels(OsmGeoPoint(bounds.north, bounds.west), nwPixel)
+            projection.toPixels(OsmGeoPoint(bounds.south, bounds.east), sePixel)
+            dstRect.set(
+                nwPixel.x.toFloat(),
+                nwPixel.y.toFloat(),
+                sePixel.x.toFloat(),
+                sePixel.y.toFloat(),
+            )
+            paint.alpha = ((1f - current.transparency.coerceIn(0f, 1f)) * 255f).toInt().coerceIn(0, 255)
+            canvas.drawBitmap(current.bitmap, null, dstRect, paint)
+        }
+    }
+}
+
+/**
+ * Draws tappable, zoom-clustered MOENV AQI station pills inside osmdroid's own draw pass
+ * with smooth glide animation when clusters merge or split on zoom.
+ */
+private class OsmAirQualityStationsOverlay(
+    private val density: Density,
+    private val textMeasurer: TextMeasurer,
+    private val mapView: MapView,
+) : Overlay() {
+    private var layer: AirQualityStationLayer? = null
+    private var cachedZoom = Float.NaN
+    private var cachedClusters: List<AirQualityStationCluster> = emptyList()
+    private var clusterOrigins: Map<String, GeoPoint> = emptyMap()
+    private val lastStationPos = mutableMapOf<String, GeoPoint>()
+    private var animStartMillis = 0L
+    private val drawScope = CanvasDrawScope()
+    private val pixel = android.graphics.Point()
+
+    fun update(layer: AirQualityStationLayer?): Boolean {
+        if (this.layer == layer) return false
+        this.layer = layer
+        this.cachedZoom = Float.NaN
+        return true
+    }
+
+    private fun clustersFor(current: AirQualityStationLayer, zoomLevel: Double): List<AirQualityStationCluster> {
+        val quantized = (zoomLevel * 2.0).toInt() / 2f
+        if (quantized != cachedZoom) {
+            cachedZoom = quantized
+            val next = clusterAqiStations(
+                stations = current.stations,
+                zoom = quantized,
+                selectedStationName = current.selectedStationName,
+            )
+            val origins = mutableMapOf<String, GeoPoint>()
+            var anyMoved = false
+            next.forEach { cluster ->
+                val prevCoords = cluster.stations.mapNotNull { lastStationPos[it.stationName] }
+                val origin = if (prevCoords.isEmpty()) {
+                    cluster.center
+                } else {
+                    GeoPoint(
+                        prevCoords.map(GeoPoint::latitude).average(),
+                        prevCoords.map(GeoPoint::longitude).average(),
+                    )
+                }
+                if (origin != cluster.center) anyMoved = true
+                origins[cluster.key] = origin
+            }
+            next.forEach { cluster ->
+                cluster.stations.forEach { station ->
+                    lastStationPos[station.stationName] = cluster.center
+                }
+            }
+            clusterOrigins = origins
+            cachedClusters = next
+            animStartMillis = if (anyMoved) android.os.SystemClock.uptimeMillis() else 0L
+        }
+        return cachedClusters
+    }
+
+    override fun draw(canvas: android.graphics.Canvas, projection: Projection) {
+        val current = layer ?: return
+        if (current.stations.isEmpty()) return
+        val clusters = clustersFor(current, projection.zoomLevel)
+        val rawT = if (animStartMillis == 0L) {
+            1f
+        } else {
+            ((android.os.SystemClock.uptimeMillis() - animStartMillis) / 240f).coerceIn(0f, 1f)
+        }
+        // Smooth ease-out cubic
+        val easedT = 1f - (1f - rawT) * (1f - rawT) * (1f - rawT)
+        if (rawT < 1f) mapView.postInvalidateOnAnimation()
+
+        drawScope.draw(
+            density,
+            LayoutDirection.Ltr,
+            Canvas(canvas),
+            Size(canvas.width.toFloat(), canvas.height.toFloat()),
+        ) {
+            var selectedCluster: AirQualityStationCluster? = null
+            clusters.forEach { cluster ->
+                val isSelected = cluster.stations.size == 1 && cluster.containsSelected
+                if (isSelected) {
+                    selectedCluster = cluster
+                } else {
+                    val origin = clusterOrigins[cluster.key] ?: cluster.center
+                    val lat = origin.latitude + (cluster.center.latitude - origin.latitude) * easedT
+                    val lon = origin.longitude + (cluster.center.longitude - origin.longitude) * easedT
+                    projection.toPixels(OsmGeoPoint(lat, lon), pixel)
+                    drawAqiStationPill(
+                        center = Offset(pixel.x.toFloat(), pixel.y.toFloat()),
+                        aqi = cluster.representativeAqi,
+                        clusterCount = cluster.stations.size,
+                        selected = false,
+                        darkMap = current.darkMap,
+                        textMeasurer = textMeasurer,
+                    )
+                }
+            }
+            selectedCluster?.let { cluster ->
+                val origin = clusterOrigins[cluster.key] ?: cluster.center
+                val lat = origin.latitude + (cluster.center.latitude - origin.latitude) * easedT
+                val lon = origin.longitude + (cluster.center.longitude - origin.longitude) * easedT
+                projection.toPixels(OsmGeoPoint(lat, lon), pixel)
+                drawAqiStationPill(
+                    center = Offset(pixel.x.toFloat(), pixel.y.toFloat()),
+                    aqi = cluster.representativeAqi,
+                    clusterCount = 1,
+                    selected = true,
+                    darkMap = current.darkMap,
+                    textMeasurer = textMeasurer,
+                )
+            }
+        }
+    }
+
+    override fun onSingleTapConfirmed(e: android.view.MotionEvent, mapView: MapView): Boolean {
+        val current = layer ?: return false
+        if (current.stations.isEmpty()) return false
+        val projection = mapView.projection
+        val clusters = clustersFor(current, mapView.zoomLevelDouble)
+        val hitRadiusPx = 24f * density.density
+        val hitRadiusSq = hitRadiusPx * hitRadiusPx
+        var nearest: AirQualityStationCluster? = null
+        var bestDistSq = Float.MAX_VALUE
+        clusters.forEach { cluster ->
+            projection.toPixels(
+                OsmGeoPoint(cluster.center.latitude, cluster.center.longitude),
+                pixel,
+            )
+            val dx = e.x - pixel.x
+            val dy = e.y - pixel.y
+            val distSq = dx * dx + dy * dy
+            if (distSq <= hitRadiusSq && distSq < bestDistSq) {
+                bestDistSq = distSq
+                nearest = cluster
+            }
+        }
+        val tapped = nearest ?: return false
+        if (tapped.stations.size == 1) {
+            current.onSelectStation(tapped.stations.first())
+        } else {
+            val nextZoom = (mapView.zoomLevelDouble.toFloat() + 1.8f).coerceAtMost(13.5f)
+            current.onSelectCluster(tapped.center, nextZoom)
+        }
+        return true
+    }
+}
+
 /** Keeps the typhoon overlay directly below the target marker and above weather tiles. */
-private fun syncTyphoonOverlay(mapView: MapView, overlay: OsmTyphoonOverlay, attached: Boolean, insertBefore: Marker) {
+private fun syncTyphoonOverlay(mapView: MapView, overlay: OsmTyphoonOverlay, attached: Boolean, insertBefore: Marker) =
+    syncOverlayBeforeMarker(mapView, overlay, attached, insertBefore)
+
+private fun syncOverlayBeforeMarker(mapView: MapView, overlay: Overlay, attached: Boolean, insertBefore: Marker) {
     val overlays = mapView.overlays
     val index = overlays.indexOf(overlay)
     if (!attached) {

@@ -1,7 +1,13 @@
 package com.rton.howstheweather.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.Orientation
@@ -336,15 +342,24 @@ private fun LayerSegment(
                 )
             }
             Spacer(Modifier.width(6.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = if (emphasis > .5f) FontWeight.SemiBold else FontWeight.Medium,
-                color = textColor,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis,
-            )
+            AnimatedContent(
+                targetState = label,
+                transitionSpec = {
+                    fadeIn(tween(durationMillis = 240, easing = FastOutSlowInEasing)) togetherWith
+                        fadeOut(tween(durationMillis = 160, easing = FastOutSlowInEasing))
+                },
+                label = "layerSegmentLabel",
+            ) { animatedLabel ->
+                Text(
+                    text = animatedLabel,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = if (emphasis > .5f) FontWeight.SemiBold else FontWeight.Medium,
+                    color = textColor,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

@@ -64,6 +64,18 @@ class WeatherTileProvider(
                 output.write(block.array(), 0, count * Float.SIZE_BYTES)
                 offset += count
             }
+            val weights = frame.alphaWeights
+            output.writeBoolean(weights != null)
+            if (weights != null) {
+                var wOffset = 0
+                while (wOffset < weights.size) {
+                    val count = minOf(floats.capacity(), weights.size - wOffset)
+                    floats.clear()
+                    floats.put(weights, wOffset, count)
+                    output.write(block.array(), 0, count * Float.SIZE_BYTES)
+                    wOffset += count
+                }
+            }
             output.writeUTF(style.theme.name)
             output.writeUTF(style.unit.name)
             output.writeFloat(style.opacity)
@@ -152,14 +164,28 @@ class WeatherTileProvider(
                 values[py][px] = value
             }
         }
+        val hasAlphaWeights = grid.alphaWeights != null
         for (py in 0 until renderSize) {
+            val lat = latitudes[py + if (values == null) 0 else CONTOUR_GUTTER]
             for (px in 0 until renderSize) {
                 val value = if (values == null) {
-                    grid.sampleForDisplayOrNaN(latitudes[py], longitudes[px])
+                    grid.sampleForDisplayOrNaN(lat, longitudes[px])
                 } else {
                     values[py + CONTOUR_GUTTER][px + CONTOUR_GUTTER]
                 }
-                val color = style.colorFor(value)
+                var color = style.colorFor(value)
+                if (color != Color.TRANSPARENT && hasAlphaWeights) {
+                    val lon = longitudes[px + if (values == null) 0 else CONTOUR_GUTTER]
+                    val weight = grid.sampleAlphaForDisplay(lat, lon)
+                    color = when {
+                        weight <= 0.004f -> Color.TRANSPARENT
+                        weight < 0.996f -> {
+                            val alpha = ((color ushr 24) * weight + 0.5f).toInt().coerceIn(0, 255)
+                            (alpha shl 24) or (color and 0x00FFFFFF)
+                        }
+                        else -> color
+                    }
+                }
                 if (color != Color.TRANSPARENT) anyVisible = true
                 pixels[py * renderSize + px] = color
             }

@@ -3,12 +3,16 @@
 package com.rton.howstheweather.ui
 
 import android.content.Context
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -16,6 +20,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -25,6 +30,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
@@ -45,13 +51,18 @@ import com.google.android.gms.maps.model.Dash
 import com.google.android.gms.maps.model.Gap
 import com.google.android.gms.maps.model.JointType
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.model.MapColorScheme
 import com.google.android.gms.maps.model.MapStyleOptions
 import com.google.android.gms.maps.model.PatternItem
 import com.google.android.gms.maps.model.RoundCap
 import com.google.maps.android.compose.CameraPositionState
 import com.google.maps.android.compose.Circle
+import com.google.maps.android.compose.ComposeMapColorScheme
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.GoogleMapComposable
+import com.google.maps.android.compose.GroundOverlay
+import com.google.maps.android.compose.GroundOverlayPosition
 import com.google.maps.android.compose.MapEffect
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.MapUiSettings
@@ -73,6 +84,7 @@ import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 /** Loads the Maps SDK module ahead of the first map view; repeated calls are cheap. */
 internal fun warmUpGoogleMaps(context: Context) {
@@ -92,6 +104,8 @@ internal fun GoogleWeatherMap(
     onMapLoaded: () -> Unit,
     onCameraIdle: (MapCameraPosition) -> Unit,
     typhoon: TyphoonMapLayer?,
+    airQualityStations: AirQualityStationLayer? = null,
+    groundOverlays: List<WeatherGroundOverlay> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -125,6 +139,9 @@ internal fun GoogleWeatherMap(
     }
     val configuredMapId = BuildConfig.MAP_ID.trim()
     val usesBundledMapStyle = configuredMapId.isBlank() || configuredMapId == "DEMO_MAP_ID"
+    val mapBackgroundColor = MaterialTheme.colorScheme.background
+    val composeColorScheme = if (darkMap) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT
+    val optionsColorScheme = if (darkMap) MapColorScheme.DARK else MapColorScheme.LIGHT
     val fallbackStyle = remember(darkMap, usesBundledMapStyle) {
         if (usesBundledMapStyle) {
             MapStyleOptions.loadRawResourceStyle(context, if (darkMap) R.raw.map_style_dark else R.raw.map_style_light)
@@ -136,12 +153,15 @@ internal fun GoogleWeatherMap(
         cameraPositionState = cameraState,
         googleMapOptionsFactory = {
             GoogleMapOptions().camera(cameraState.position).apply {
+                backgroundColor(mapBackgroundColor.toArgb())
+                mapColorScheme(optionsColorScheme)
                 if (!usesBundledMapStyle) {
                     mapId(configuredMapId)
                 }
             }
         },
         properties = MapProperties(mapStyleOptions = fallbackStyle),
+        mapColorScheme = composeColorScheme,
         // Keep the Maps SDK attribution clear of our bottom controls and legend.
         // The Android Maps SDK fixes the logo to the start edge and only exposes
         // padding for moving its built-in attribution away from overlapping UI.
@@ -194,11 +214,136 @@ internal fun GoogleWeatherMap(
                 }
             }
         }
+        groundOverlays.forEach { overlay ->
+            key(overlay.key) {
+                val image = remember(overlay.bitmap) {
+                    BitmapDescriptorFactory.fromBitmap(overlay.bitmap)
+                }
+                val bounds = remember(overlay.bounds) {
+                    LatLngBounds(
+                        LatLng(overlay.bounds.south, overlay.bounds.west),
+                        LatLng(overlay.bounds.north, overlay.bounds.east),
+                    )
+                }
+                GroundOverlay(
+                    position = GroundOverlayPosition.create(bounds),
+                    image = image,
+                    transparency = overlay.transparency.coerceIn(0f, 1f),
+                    zIndex = overlay.zIndex,
+                    visible = overlay.visible,
+                )
+            }
+        }
         Marker(
             state = rememberUpdatedMarkerState(LatLng(target.coordinate.latitude, target.coordinate.longitude)),
             title = target.displayName,
         )
         if (typhoon != null) GoogleTyphoonLayer(typhoon, cameraState)
+        if (airQualityStations != null) GoogleAirQualityStationsLayer(airQualityStations, cameraState)
+    }
+}
+
+@Composable
+@GoogleMapComposable
+private fun GoogleAirQualityStationsLayer(
+    layer: AirQualityStationLayer,
+    cameraState: CameraPositionState,
+) {
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val currentOnSelect by rememberUpdatedState(layer.onSelectStation)
+    val currentOnSelectCluster by rememberUpdatedState(layer.onSelectCluster)
+    val quantizedZoom by remember(cameraState) {
+        derivedStateOf { (cameraState.position.zoom * 2f).roundToInt() / 2f }
+    }
+    val clusters = remember(layer.stations, quantizedZoom, layer.selectedStationName) {
+        clusterAqiStations(
+            stations = layer.stations,
+            zoom = quantizedZoom,
+            selectedStationName = layer.selectedStationName,
+        )
+    }
+    val lastStationPos = remember { mutableMapOf<String, GeoPoint>() }
+    val previousKeys = remember { mutableSetOf<String>() }
+    val animatedClusters = remember(clusters) {
+        val hadPrevious = previousKeys.isNotEmpty()
+        val entries = clusters.map { cluster ->
+            val prevCoords = cluster.stations.mapNotNull { lastStationPos[it.stationName] }
+            val fromPos = if (prevCoords.isEmpty()) {
+                cluster.center
+            } else {
+                GeoPoint(
+                    prevCoords.map(GeoPoint::latitude).average(),
+                    prevCoords.map(GeoPoint::longitude).average(),
+                )
+            }
+            val isNew = hadPrevious && cluster.key !in previousKeys
+            Triple(cluster, fromPos, isNew)
+        }
+        previousKeys.clear()
+        clusters.forEach { cluster ->
+            previousKeys.add(cluster.key)
+            cluster.stations.forEach { station ->
+                lastStationPos[station.stationName] = cluster.center
+            }
+        }
+        entries
+    }
+    val iconCache = remember(layer.darkMap, density) { mutableMapOf<Long, BitmapDescriptor>() }
+    animatedClusters.forEach { (cluster, fromPos, isNew) ->
+        val count = cluster.stations.size
+        val selected = count == 1 && cluster.containsSelected
+        val cacheKey = (cluster.representativeAqi.toLong() shl 16) or
+            ((count.coerceAtMost(999).toLong()) shl 1) or
+            if (selected) 1L else 0L
+        val icon = iconCache.getOrPut(cacheKey) {
+            BitmapDescriptorFactory.fromBitmap(
+                renderAqiStationPinBitmap(
+                    aqi = cluster.representativeAqi,
+                    clusterCount = count,
+                    selected = selected,
+                    darkMap = layer.darkMap,
+                    density = density,
+                    textMeasurer = textMeasurer,
+                ),
+            )
+        }
+        key(cluster.key) {
+            val anim = remember(cluster.key) {
+                Animatable(if (isNew || fromPos != cluster.center) 0f else 1f)
+            }
+            LaunchedEffect(cluster.key, fromPos, cluster.center) {
+                if (anim.value < 1f) {
+                    anim.animateTo(1f, tween(durationMillis = 240, easing = FastOutSlowInEasing))
+                }
+            }
+            val t = anim.value.toDouble()
+            val pos = LatLng(
+                fromPos.latitude + (cluster.center.latitude - fromPos.latitude) * t,
+                fromPos.longitude + (cluster.center.longitude - fromPos.longitude) * t,
+            )
+            Marker(
+                state = rememberUpdatedMarkerState(pos),
+                icon = icon,
+                anchor = CENTER_ANCHOR,
+                alpha = 0.25f + 0.75f * anim.value,
+                flat = false,
+                zIndex = when {
+                    selected -> AQI_MARKER_Z_SELECTED
+                    count > 1 -> AQI_MARKER_Z_STATION + 0.5f
+                    else -> AQI_MARKER_Z_STATION
+                },
+                onClick = {
+                    if (count == 1) {
+                        currentOnSelect(cluster.stations.first())
+                    } else {
+                        val nextZoom = (cameraState.position.zoom + 1.8f).coerceAtMost(13.5f)
+                        currentOnSelectCluster(cluster.center, nextZoom)
+                    }
+                    true
+                },
+            )
+        }
     }
 }
 
@@ -494,3 +639,5 @@ private const val TYPHOON_MARKER_Z_DOT = -4f
 private const val TYPHOON_MARKER_Z_LABEL = -3f
 private const val TYPHOON_MARKER_Z_GLYPH = -2f
 private const val TYPHOON_MARKER_Z_NAME = -1f
+private const val AQI_MARKER_Z_STATION = 1.5f
+private const val AQI_MARKER_Z_SELECTED = 4f

@@ -35,11 +35,16 @@ data class WeatherSnapshot(
 /**
  * Supplemental updates are produced from the initial wide-radar snapshot and
  * can arrive after the independently loaded regional radar. Keep that newer
- * regional frame unless the update explicitly contains a replacement.
+ * regional frame unless the update explicitly contains a newer or same-time
+ * replacement.
  */
 internal fun WeatherSnapshot.preserveRegionalRadarFrom(previous: WeatherSnapshot?): WeatherSnapshot {
     val previousRegional = previous?.radarRegional ?: return this
-    return if (radarRegional == null) copy(radarRegional = previousRegional) else this
+    return if (radarRegional == null || previousRegional.validAt.isAfter(radarRegional.validAt)) {
+        copy(radarRegional = previousRegional)
+    } else {
+        this
+    }
 }
 
 /**

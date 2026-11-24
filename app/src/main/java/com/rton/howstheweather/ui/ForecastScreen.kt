@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Cloud
@@ -42,7 +43,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -93,6 +97,7 @@ fun SummaryScreen(
     state: HomeUiState,
     onClothingToleranceChange: (Int) -> Unit,
     onClothingWindowChange: (ClothingWindow) -> Unit = {},
+    onOpenAirQualityMap: (Rect?) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val zone = remember { ZoneId.of("Asia/Taipei") }
@@ -148,6 +153,11 @@ fun SummaryScreen(
                 loading = state.airQualityLoading,
                 unavailableReason = state.airQualityUnavailableReason,
                 zone = zone,
+                onClick = if (state.airQualityStations.isNotEmpty() || state.airQuality != null) {
+                    onOpenAirQualityMap
+                } else {
+                    null
+                },
             )
         }
         Spacer(Modifier.height(4.dp))
@@ -363,13 +373,19 @@ private fun AirQualityCard(
     loading: Boolean,
     unavailableReason: String?,
     zone: ZoneId,
+    onClick: ((Rect?) -> Unit)? = null,
 ) {
     val timeFormatter = remember { DateTimeFormatter.ofPattern("HH:mm").withZone(zone) }
     val colors = MaterialTheme.colorScheme
     val dark = colors.surface.luminance() < .5f
+    val cardBounds = remember { arrayOfNulls<Rect>(1) }
 
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        onClick = { onClick?.invoke(cardBounds[0]) },
+        enabled = onClick != null,
+        modifier = Modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { coords -> cardBounds[0] = coords.boundsInRoot() },
         shape = RoundedCornerShape(20.dp),
         color = colors.surfaceVariant,
     ) {
@@ -433,6 +449,15 @@ private fun AirQualityCard(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = colors.onSurfaceVariant,
                             )
+                            if (onClick != null) {
+                                Spacer(Modifier.width(2.dp))
+                                Icon(
+                                    Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                    contentDescription = "開啟空氣品質地圖",
+                                    modifier = Modifier.size(18.dp).align(Alignment.CenterVertically),
+                                    tint = colors.onSurfaceVariant,
+                                )
+                            }
                         }
                         Text(
                             buildString {

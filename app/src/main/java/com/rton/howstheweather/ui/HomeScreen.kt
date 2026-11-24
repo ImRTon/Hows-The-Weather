@@ -17,7 +17,12 @@ import androidx.core.content.ContextCompat
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
@@ -59,6 +64,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -109,6 +115,7 @@ import com.rton.howstheweather.data.OBSERVATION_FRAME_INTERVAL_MINUTES
 import com.rton.howstheweather.data.OBSERVATION_HISTORY_MINUTES
 import com.rton.howstheweather.domain.*
 import com.rton.howstheweather.render.RenderTheme
+import com.rton.howstheweather.render.WeatherGridBitmapRenderer
 import com.rton.howstheweather.render.WeatherRenderStyle
 import com.rton.howstheweather.render.WeatherTileProvider
 import java.time.Instant
@@ -132,6 +139,13 @@ import kotlin.math.sin
 fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
     val refreshPull = remember(state.destination) { mutableFloatStateOf(0f) }
+    var airQualityMapOpen by rememberSaveable { mutableStateOf(false) }
+    var airQualityOriginBounds by remember { mutableStateOf<Rect?>(null) }
+    LaunchedEffect(state.destination) {
+        if (state.destination != AppDestination.SUMMARY) {
+            airQualityMapOpen = false
+        }
+    }
     LaunchedEffect(state.message) {
         state.message?.let {
             snackbarHostState.showSnackbar(
@@ -142,30 +156,43 @@ fun HomeScreen(state: HomeUiState, viewModel: HomeViewModel) {
             viewModel.clearMessage()
         }
     }
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = { AppTopBar(state, viewModel, refreshPull) },
-        bottomBar = { WeatherNavigationBar(state.destination, viewModel::selectDestination) },
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-    ) { padding ->
-        when (state.destination) {
-            AppDestination.SUMMARY -> SummaryScreen(
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            contentWindowInsets = WindowInsets.safeDrawing,
+            topBar = { AppTopBar(state, viewModel, refreshPull) },
+            bottomBar = { WeatherNavigationBar(state.destination, viewModel::selectDestination) },
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+        ) { padding ->
+            when (state.destination) {
+                AppDestination.SUMMARY -> SummaryScreen(
+                    state = state,
+                    onClothingToleranceChange = viewModel::setClothingTolerance,
+                    onClothingWindowChange = viewModel::setClothingWindow,
+                    onOpenAirQualityMap = { bounds ->
+                        airQualityOriginBounds = bounds
+                        airQualityMapOpen = true
+                    },
+                    modifier = Modifier.padding(padding).fillMaxSize(),
+                )
+                AppDestination.FORECAST -> ForecastScreen(
+                    state = state,
+                    modifier = Modifier.padding(padding).fillMaxSize(),
+                )
+                AppDestination.NOW,
+                AppDestination.PRECIPITATION -> WeatherWorkspace(
+                    state = state,
+                    viewModel = viewModel,
+                    refreshPull = refreshPull,
+                    modifier = Modifier.padding(padding).fillMaxSize(),
+                )
+            }
+        }
+        if (airQualityMapOpen) {
+            AirQualityMapScreen(
                 state = state,
-                onClothingToleranceChange = viewModel::setClothingTolerance,
-                onClothingWindowChange = viewModel::setClothingWindow,
-                modifier = Modifier.padding(padding).fillMaxSize(),
-            )
-            AppDestination.FORECAST -> ForecastScreen(
-                state = state,
-                modifier = Modifier.padding(padding).fillMaxSize(),
-            )
-            AppDestination.NOW,
-            AppDestination.PRECIPITATION -> WeatherWorkspace(
-                state = state,
-                viewModel = viewModel,
-                refreshPull = refreshPull,
-                modifier = Modifier.padding(padding).fillMaxSize(),
+                originBounds = airQualityOriginBounds,
+                onBack = { airQualityMapOpen = false },
             )
         }
     }
@@ -176,20 +203,39 @@ private fun WeatherNavigationBar(
     destination: AppDestination,
     onSelect: (AppDestination) -> Unit,
 ) {
-    NavigationBar {
-        listOf(
-            Triple(AppDestination.NOW, Icons.Default.NearMe, "即時"),
-            Triple(AppDestination.SUMMARY, Icons.Default.WbSunny, "摘要"),
-            Triple(AppDestination.FORECAST, Icons.Default.CalendarMonth, "預報"),
-            Triple(AppDestination.PRECIPITATION, Icons.Default.Map, "降水"),
-        ).forEach { (item, icon, label) ->
-            NavigationBarItem(
-                selected = destination == item,
-                onClick = { onSelect(item) },
-                icon = { Icon(icon, contentDescription = null) },
-                label = { Text(label) },
-                alwaysShowLabel = true,
-            )
+    val colors = MaterialTheme.colorScheme
+    val itemColors = NavigationBarItemDefaults.colors(
+        selectedIconColor = colors.primary,
+        selectedTextColor = colors.onSurface,
+        indicatorColor = colors.primaryContainer,
+        unselectedIconColor = colors.onSurfaceVariant,
+        unselectedTextColor = colors.onSurfaceVariant,
+    )
+    Column {
+        HorizontalDivider(
+            thickness = 0.5.dp,
+            color = colors.outlineVariant.copy(alpha = 0.6f),
+        )
+        NavigationBar(
+            containerColor = colors.surface,
+            contentColor = colors.onSurface,
+            tonalElevation = 0.dp,
+        ) {
+            listOf(
+                Triple(AppDestination.NOW, Icons.Default.NearMe, "即時"),
+                Triple(AppDestination.SUMMARY, Icons.Default.WbSunny, "摘要"),
+                Triple(AppDestination.FORECAST, Icons.Default.CalendarMonth, "預報"),
+                Triple(AppDestination.PRECIPITATION, Icons.Default.Map, "降水"),
+            ).forEach { (item, icon, label) ->
+                NavigationBarItem(
+                    selected = destination == item,
+                    onClick = { onSelect(item) },
+                    icon = { Icon(icon, contentDescription = null) },
+                    label = { Text(label) },
+                    alwaysShowLabel = true,
+                    colors = itemColors,
+                )
+            }
         }
     }
 }
@@ -207,7 +253,7 @@ private fun AppTopBar(state: HomeUiState, viewModel: HomeViewModel, refreshPull:
         AppDestination.FORECAST -> "逐 3 小時 · 本週日夜"
         AppDestination.PRECIPITATION -> null
         AppDestination.NOW -> when {
-            state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> "未來 1 小時 · 累積預報"
+            state.layers.primary == PrimaryLayer.ONE_HOUR_RAIN -> "未來 1 小時"
             state.selectedMinute < 0 && state.activeGrid?.unit == WeatherUnit.LUMINANCE ->
                 "過去 ${-state.selectedMinute} 分 · 衛星觀測"
             state.selectedMinute < 0 -> "過去 ${-state.selectedMinute} 分 · 雷達觀測"
@@ -1630,50 +1676,48 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             WindParticleCamera(position.center, position.zoom, bottomInsetPx = mapCenterBottomInsetPx)
         }
     }
-    val firstTileLayerState = remember { WeatherTileLayerState() }
-    val secondTileLayerState = remember { WeatherTileLayerState() }
-    // Observe attachment before invalidating either overlay's SDK tile cache.
-    val tileOverlaysAttached = firstTileLayerState.isAttached && secondTileLayerState.isAttached
-    val tileProviders = remember(grid?.unit, renderTheme) {
-        grid?.let {
-            val style = weatherRenderStyle(it.unit, renderTheme)
-            arrayOf(
-                WeatherTileProvider(it, style, context.cacheDir.resolve("weather-tiles")),
-                WeatherTileProvider(it, style, context.cacheDir.resolve("weather-tiles")),
-            )
+    var frontTileSlot by remember(renderTheme) { mutableIntStateOf(0) }
+    var slot0Frame by remember(renderTheme) { mutableStateOf<Pair<WeatherGrid, android.graphics.Bitmap>?>(null) }
+    var slot1Frame by remember(renderTheme) { mutableStateOf<Pair<WeatherGrid, android.graphics.Bitmap>?>(null) }
+    var displayedGrid by remember(renderTheme) { mutableStateOf<WeatherGrid?>(null) }
+    var displayedMinute by remember(renderTheme) { mutableIntStateOf(state.selectedMinute) }
+    var timelineFromMinute by remember(renderTheme) { mutableIntStateOf(state.selectedMinute) }
+    var timelineToMinute by remember(renderTheme) { mutableIntStateOf(state.selectedMinute) }
+    val tileBlend = remember(renderTheme) { Animatable(0f) }
+    var backBufferVisible by remember(renderTheme) { mutableStateOf(false) }
+
+    LaunchedEffect(state.destination, grid, renderTheme) {
+        if (state.destination != AppDestination.NOW) return@LaunchedEffect
+        val targetGrid = grid
+        if (targetGrid == null) {
+            slot0Frame = null
+            slot1Frame = null
+            displayedGrid = null
+            backBufferVisible = false
+            return@LaunchedEffect
         }
-    }
-    val quantitativeTileProvider = remember(quantitativeGrid, renderTheme) {
-        quantitativeGrid?.let {
-            val style = when (it.unit) {
-                WeatherUnit.MILLIMETERS_ONE_HOUR -> WeatherRenderStyle.hourlyRain(renderTheme, 1f)
-                WeatherUnit.MILLIMETERS_PER_HOUR -> WeatherRenderStyle.rain(renderTheme, 1f)
-                WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(renderTheme, 1f)
-                else -> null
-            }
-            style?.let { renderStyle -> WeatherTileProvider(it, renderStyle, context.cacheDir.resolve("weather-tiles")) }
-        }
-    }
-    var frontTileSlot by remember(grid?.unit, renderTheme) { mutableIntStateOf(0) }
-    var displayedGrid by remember(grid?.unit, renderTheme) { mutableStateOf(grid) }
-    var displayedMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
-    var timelineFromMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
-    var timelineToMinute by remember(grid?.unit, renderTheme) { mutableIntStateOf(state.selectedMinute) }
-    val tileBlend = remember(grid?.unit, renderTheme) { Animatable(0f) }
-    var backBufferVisible by remember(grid?.unit, renderTheme) { mutableStateOf(false) }
-    LaunchedEffect(tileOverlaysAttached, state.destination, grid, tileProviders) {
-        // TileOverlayState is attached only after TileOverlay enters the map
-        // composition. Clearing it before that point throws and crashes the
-        // app when weather data arrives before the map composition is ready.
-        if (!tileOverlaysAttached || state.destination != AppDestination.NOW) return@LaunchedEffect
-        val providers = tileProviders ?: return@LaunchedEffect
-        val targetGrid = grid ?: return@LaunchedEffect
         val shown = displayedGrid
-        if (shown === targetGrid || (shown != null && shown.rendersSameFrameAs(targetGrid))) {
-            // Startup applies the cached, critical, and enriched snapshots in quick
-            // succession, often with an identical frame. Re-rendering and clearing
-            // the map's tile cache for those would only add work and flicker.
-            providers[frontTileSlot].updateGrid(targetGrid)
+        val targetBitmap = withContext(Dispatchers.Default) {
+            WeatherGridBitmapRenderer.render(targetGrid, weatherRenderStyle(targetGrid.unit, renderTheme))
+        }
+        val activeSlotFrame = if (frontTileSlot == 0) slot0Frame else slot1Frame
+        if (shown != null && activeSlotFrame != null &&
+            (shown === targetGrid || shown.rendersSameFrameAs(targetGrid))
+        ) {
+            if (tileBlend.value > 0f) {
+                tileBlend.animateTo(
+                    targetValue = 0f,
+                    animationSpec = tween(
+                        durationMillis = (TILE_COVERAGE_BLEND_DURATION_MILLIS * tileBlend.value)
+                            .roundToInt()
+                            .coerceAtLeast(1),
+                        easing = FastOutSlowInEasing,
+                    ),
+                )
+            }
+            backBufferVisible = false
+            if (frontTileSlot == 0) slot0Frame = targetGrid to targetBitmap
+            else slot1Frame = targetGrid to targetBitmap
             displayedGrid = targetGrid
             displayedMinute = state.selectedMinute
             timelineFromMinute = state.selectedMinute
@@ -1682,20 +1726,29 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             return@LaunchedEffect
         }
 
-        val backTileSlot = 1 - frontTileSlot
-        val backProvider = providers[backTileSlot]
-        // Let the SDK request the actual current viewport, not old animation views.
-        backProvider.updateGrid(targetGrid)
-        if (backTileSlot == 0) firstTileLayerState.clearTileCache()
-        else secondTileLayerState.clearTileCache()
-        backBufferVisible = true
-        // Let the visibility change reach the map before the settle period starts.
-        withFrameNanos { }
-        withFrameNanos { }
-        delay(TILE_BACK_BUFFER_SETTLE_MILLIS)
+        if (activeSlotFrame == null) {
+            if (frontTileSlot == 0) slot0Frame = targetGrid to targetBitmap
+            else slot1Frame = targetGrid to targetBitmap
+            backBufferVisible = false
+            tileBlend.snapTo(0f)
+            displayedGrid = targetGrid
+            displayedMinute = state.selectedMinute
+            timelineFromMinute = state.selectedMinute
+            timelineToMinute = state.selectedMinute
+            viewModel.onWeatherFramePresented(targetGrid)
+            return@LaunchedEffect
+        }
 
+        val isPlaybackBlend = state.isPlaying && shown?.unit == targetGrid.unit
+        val isCoverageBlend = !isPlaybackBlend && shown != null && shown.isCoverageTransitionTo(targetGrid)
+        val backTileSlot = 1 - frontTileSlot
         tileBlend.snapTo(0f)
-        if (state.isPlaying && displayedGrid?.unit == targetGrid.unit) {
+        if (backTileSlot == 0) slot0Frame = targetGrid to targetBitmap
+        else slot1Frame = targetGrid to targetBitmap
+        backBufferVisible = true
+        withFrameNanos { }
+
+        if (isPlaybackBlend) {
             timelineFromMinute = displayedMinute
             timelineToMinute = state.selectedMinute
             tileBlend.animateTo(
@@ -1703,6 +1756,14 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
                 animationSpec = tween(
                     durationMillis = TILE_BLEND_DURATION_MILLIS,
                     easing = LinearEasing,
+                ),
+            )
+        } else if (isCoverageBlend) {
+            tileBlend.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(
+                    durationMillis = TILE_COVERAGE_BLEND_DURATION_MILLIS,
+                    easing = FastOutSlowInEasing,
                 ),
             )
         } else {
@@ -1716,6 +1777,28 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
         timelineToMinute = state.selectedMinute
         tileBlend.snapTo(0f)
         viewModel.onWeatherFramePresented(targetGrid)
+    }
+
+    var quantitativeFrame by remember(renderTheme) {
+        mutableStateOf<Pair<WeatherGrid, android.graphics.Bitmap>?>(null)
+    }
+    LaunchedEffect(state.destination, quantitativeGrid, renderTheme) {
+        if (state.destination != AppDestination.PRECIPITATION) return@LaunchedEffect
+        val target = quantitativeGrid
+        if (target == null) {
+            quantitativeFrame = null
+            return@LaunchedEffect
+        }
+        val style = when (target.unit) {
+            WeatherUnit.MILLIMETERS_ONE_HOUR -> WeatherRenderStyle.hourlyRain(renderTheme, 1f)
+            WeatherUnit.MILLIMETERS_PER_HOUR -> WeatherRenderStyle.rain(renderTheme, 1f)
+            WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(renderTheme, 1f)
+            else -> null
+        } ?: return@LaunchedEffect
+        val bitmap = withContext(Dispatchers.Default) {
+            WeatherGridBitmapRenderer.render(target, style)
+        }
+        quantitativeFrame = target to bitmap
     }
     val tileWeights = tileBlendWeights(frontTileSlot, tileBlend.value)
     val timelineMinute = if (state.isPlaying) {
@@ -1778,46 +1861,58 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
     // Written by onSizeChanged and read only during layout, so neither recomposes the map.
     val topControlsHeight = remember { mutableIntStateOf(0) }
     val bottomControlsHeight = remember { mutableIntStateOf(0) }
-    val weatherLayers = buildList {
-        if (tileProviders != null) {
-            add(
-                WeatherTileLayer(
-                    key = "now-0",
-                    provider = tileProviders[0],
-                    state = firstTileLayerState,
-                    transparency = if (state.destination == AppDestination.NOW) {
-                        1f - state.layers.opacity * tileWeights.first
-                    } else 1f,
-                    fadeIn = false,
-                    visible = state.destination == AppDestination.NOW &&
-                        (frontTileSlot == 0 || backBufferVisible),
-                ),
-            )
-            add(
-                WeatherTileLayer(
-                    key = "now-1",
-                    provider = tileProviders[1],
-                    state = secondTileLayerState,
-                    transparency = if (state.destination == AppDestination.NOW) {
-                        1f - state.layers.opacity * tileWeights.second
-                    } else 1f,
-                    fadeIn = false,
-                    visible = state.destination == AppDestination.NOW &&
-                        (frontTileSlot == 1 || backBufferVisible),
-                ),
-            )
-        }
-        if (state.destination == AppDestination.PRECIPITATION && quantitativeTileProvider != null) {
-            add(
-                WeatherTileLayer(
-                    key = "precipitation",
-                    provider = quantitativeTileProvider,
-                    transparency = 1f - QUANTITATIVE_FORECAST_OPACITY,
-                    fadeIn = true,
-                ),
-            )
+    val groundOverlays = buildList {
+        if (state.destination == AppDestination.NOW) {
+            val nowOverlayOpacity = if (state.layers.primary == PrimaryLayer.CLOUD) {
+                maxOf(state.layers.opacity, 0.88f)
+            } else {
+                state.layers.opacity
+            }
+            slot0Frame?.let { (frameGrid, frameBitmap) ->
+                add(
+                    WeatherGroundOverlay(
+                        key = "now-0-${frameGrid.bounds}",
+                        bitmap = frameBitmap,
+                        bounds = frameGrid.bounds,
+                        transparency = (1f - nowOverlayOpacity * tileWeights.first).coerceIn(0f, 1f),
+                        zIndex = 2f,
+                        visible = frontTileSlot == 0 || backBufferVisible,
+                    ),
+                )
+            }
+            slot1Frame?.let { (frameGrid, frameBitmap) ->
+                add(
+                    WeatherGroundOverlay(
+                        key = "now-1-${frameGrid.bounds}",
+                        bitmap = frameBitmap,
+                        bounds = frameGrid.bounds,
+                        transparency = (1f - nowOverlayOpacity * tileWeights.second).coerceIn(0f, 1f),
+                        zIndex = 2.1f,
+                        visible = frontTileSlot == 1 || backBufferVisible,
+                    ),
+                )
+            }
+        } else if (state.destination == AppDestination.PRECIPITATION) {
+            quantitativeFrame?.let { (frameGrid, frameBitmap) ->
+                add(
+                    WeatherGroundOverlay(
+                        key = "precipitation-${frameGrid.bounds}",
+                        bitmap = frameBitmap,
+                        bounds = frameGrid.bounds,
+                        transparency = (1f - QUANTITATIVE_FORECAST_OPACITY).coerceIn(0f, 1f),
+                        zIndex = 2f,
+                        visible = true,
+                    ),
+                )
+            }
         }
     }
+
+    val mapCoverAlpha by animateFloatAsState(
+        targetValue = if (mapLoaded) 0f else 1f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "persistentMapCoverAlpha",
+    )
 
     Box(modifier.onSizeChanged { mapSize = it }) {
         val showTyphoon = state.destination == AppDestination.NOW &&
@@ -1828,7 +1923,7 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             target = state.target,
             cameraRequest = cameraRequest,
             onCameraRequestHandled = { cameraRequest = null },
-            weatherLayers = weatherLayers,
+            weatherLayers = emptyList(),
             bottomContentPadding = mapBottomContentPadding,
             onLongPress = { viewModel.selectTarget(it) },
             onMapLoaded = {
@@ -1839,7 +1934,18 @@ private fun PersistentWeatherMap(state: HomeUiState, viewModel: HomeViewModel, m
             onCameraIdle = { viewModel.setMapViewport(center = it.center, zoom = it.zoom) },
             modifier = Modifier.fillMaxSize(),
             typhoon = if (showTyphoon) TyphoonMapLayer(state.tropicalCyclones, darkMap) else null,
+            groundOverlays = groundOverlays,
         )
+        // Cover the map SurfaceView with the theme background until the first styled
+        // frame finishes loading so switching back to a map tab never flashes light.
+        if (mapCoverAlpha > 0.001f) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = mapCoverAlpha }
+                    .background(MaterialTheme.colorScheme.background),
+            )
+        }
         if (state.destination == AppDestination.NOW && state.layers.windEnabled) {
             WindParticleOverlay(
                 windGrid = state.windGrid,
@@ -2045,7 +2151,9 @@ private const val LOCATION_CACHE_MAX_AGE_MILLIS = 2 * 60 * 1_000L
 private const val LOCATION_FALLBACK_MAX_AGE_MILLIS = 30 * 60 * 1_000L
 private const val LOCATION_REQUEST_TIMEOUT_MILLIS = 5_000L
 private const val TILE_BACK_BUFFER_SETTLE_MILLIS = 32L
+private const val TILE_COVERAGE_BACK_BUFFER_SETTLE_MILLIS = 96L
 private const val TILE_BLEND_DURATION_MILLIS = 650
+private const val TILE_COVERAGE_BLEND_DURATION_MILLIS = 420
 private const val DEVICE_LOCATION_REFRESH_THRESHOLD_METERS = 100.0
 private const val EARTH_RADIUS_METERS = 6_371_000.0
 
@@ -2062,6 +2170,14 @@ internal fun WeatherGrid.rendersSameFrameAs(other: WeatherGrid): Boolean =
         width == other.width &&
         height == other.height &&
         bounds == other.bounds
+
+/**
+ * True when switching between two coverage products of the same physical layer
+ * (such as wide vs. regional radar), which should crossfade smoothly instead of
+ * snapping abruptly.
+ */
+internal fun WeatherGrid.isCoverageTransitionTo(other: WeatherGrid): Boolean =
+    unit == other.unit && (sourceId != other.sourceId || bounds != other.bounds)
 
 internal fun tileBlendWeights(frontSlot: Int, progress: Float): TileBlendWeights {
     require(frontSlot == 0 || frontSlot == 1)
@@ -2838,6 +2954,7 @@ internal fun WeatherLegend(
         WeatherUnit.MILLIMETERS_ONE_HOUR -> "mm/1h"
         WeatherUnit.MILLIMETERS_TWELVE_HOURS -> "mm/12h"
         WeatherUnit.LUMINANCE -> null
+        WeatherUnit.AQI -> "AQI"
     }
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val outline = MaterialTheme.colorScheme.outline
@@ -2902,4 +3019,5 @@ private fun weatherRenderStyle(unit: WeatherUnit, theme: RenderTheme): WeatherRe
     WeatherUnit.MILLIMETERS_ONE_HOUR -> WeatherRenderStyle.hourlyRain(theme, 1f)
     WeatherUnit.MILLIMETERS_TWELVE_HOURS -> WeatherRenderStyle.twelveHourRain(theme, 1f)
     WeatherUnit.LUMINANCE -> WeatherRenderStyle.cloud(theme, 1f)
+    WeatherUnit.AQI -> WeatherRenderStyle.aqi(theme, 1f)
 }

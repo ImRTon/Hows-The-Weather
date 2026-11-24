@@ -16,7 +16,7 @@ data class GeoBounds(
         point.latitude in south..north && point.longitude in west..east
 }
 
-enum class WeatherUnit { DBZ, MILLIMETERS_PER_HOUR, MILLIMETERS_ONE_HOUR, MILLIMETERS_TWELVE_HOURS, LUMINANCE }
+enum class WeatherUnit { DBZ, MILLIMETERS_PER_HOUR, MILLIMETERS_ONE_HOUR, MILLIMETERS_TWELVE_HOURS, LUMINANCE, AQI }
 
 data class WeatherGrid(
     val width: Int,
@@ -28,10 +28,12 @@ data class WeatherGrid(
     val validAt: Instant,
     val missingValue: Float = Float.NaN,
     val sourceId: String,
+    val alphaWeights: FloatArray? = null,
 ) {
     init {
         require(width > 1 && height > 1)
         require(values.size == width * height)
+        require(alphaWeights == null || alphaWeights.size == width * height)
     }
 
     fun valueAt(x: Int, y: Int): Float = values[y * width + x]
@@ -123,6 +125,26 @@ data class WeatherGrid(
         val low = minOf(row1, row2)
         val high = maxOf(row1, row2)
         return raw.coerceIn(low, high)
+    }
+
+    /** Bilinearly samples optional per-cell display opacity in [0, 1]; returns 1f when absent. */
+    fun sampleAlphaForDisplay(latitude: Double, longitude: Double): Float {
+        val weights = alphaWeights ?: return 1f
+        val gridLongitude = if (bounds.east > 180.0 && longitude < bounds.west) longitude + 360.0 else longitude
+        if (latitude !in bounds.south..bounds.north || gridLongitude !in bounds.west..bounds.east) return 0f
+        val fx = ((gridLongitude - bounds.west) / (bounds.east - bounds.west) * (width - 1))
+            .coerceIn(0.0, (width - 1).toDouble())
+        val fy = ((bounds.north - latitude) / (bounds.north - bounds.south) * (height - 1))
+            .coerceIn(0.0, (height - 1).toDouble())
+        val x0 = fx.toInt().coerceAtMost(width - 2)
+        val y0 = fy.toInt().coerceAtMost(height - 2)
+        val tx = (fx - x0).toFloat()
+        val ty = (fy - y0).toFloat()
+        val row0 = y0 * width
+        val row1 = (y0 + 1) * width
+        val top = weights[row0 + x0] + (weights[row0 + x0 + 1] - weights[row0 + x0]) * tx
+        val bottom = weights[row1 + x0] + (weights[row1 + x0 + 1] - weights[row1 + x0]) * tx
+        return (top + (bottom - top) * ty).coerceIn(0f, 1f)
     }
 
     private fun validOrNaN(v: Float): Float =
@@ -403,6 +425,7 @@ data class HomeUiState(
     val weeklyForecastLoading: Boolean = true,
     val weeklyForecastUnavailableReason: String? = null,
     val airQuality: AirQualityObservation? = null,
+    val airQualityStations: List<AirQualityObservation> = emptyList(),
     val airQualityLoading: Boolean = false,
     val airQualityUnavailableReason: String? = null,
     val destination: AppDestination = AppDestination.NOW,

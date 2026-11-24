@@ -43,6 +43,21 @@ class WeatherDataSourceTest {
         assertEquals(replacement, merged.radarRegional)
     }
 
+    @Test fun `stale cached regional radar in supplemental update never overwrites newer regional radar`() {
+        val wide = radar("wide", GeoBounds(0.0, 100.0, 50.0, 160.0))
+            .copy(validAt = Instant.parse("2026-11-24T13:30:00Z"))
+        val cachedRegional = radar("regional", GeoBounds(20.0, 118.0, 27.0, 124.0))
+            .copy(validAt = Instant.parse("2026-11-24T12:30:00Z"))
+        val freshRegional = radar("regional", GeoBounds(20.0, 118.0, 27.0, 124.0))
+            .copy(validAt = Instant.parse("2026-11-24T13:30:00Z"))
+        val previous = snapshot(wide).copy(radarRegional = freshRegional)
+        val staleEnrichment = snapshot(wide).copy(radarRegional = cachedRegional)
+
+        val merged = staleEnrichment.preserveRegionalRadarFrom(previous)
+
+        assertEquals(freshRegional, merged.radarRegional)
+    }
+
     @Test fun `missing official configuration never returns synthetic weather`() = runTest {
         val reason = "official weather unavailable"
         val source = UnavailableWeatherDataSource(reason)
