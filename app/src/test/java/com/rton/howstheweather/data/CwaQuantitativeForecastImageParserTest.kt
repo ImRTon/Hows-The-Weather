@@ -2,6 +2,7 @@ package com.rton.howstheweather.data
 
 import com.rton.howstheweather.data.CwaQuantitativeForecastImageParser.ChartRegion
 import java.time.Instant
+import kotlin.math.roundToInt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -91,8 +92,8 @@ class CwaQuantitativeForecastImageParserTest {
         val map = ChartRegion(0..4, 0..4)
         val legend = ChartRegion(3..3, 1..3)
 
-        assertTrue(parser.decodeSample(3, 2, 5, pixels, map, legend).isNaN())
-        assertEquals(0.5f, parser.decodeSample(2, 2, 5, pixels, map, legend))
+        assertTrue(parser.decodeSample(3, 2, 5, pixels, map, listOf(legend)).isNaN())
+        assertEquals(0.5f, parser.decodeSample(2, 2, 5, pixels, map, listOf(legend)))
     }
 
     @Test
@@ -112,8 +113,10 @@ class CwaQuantitativeForecastImageParserTest {
             endHour = 12,
         )
 
-        assertTrue(grid.valueAt(grid.width - 1, 100).isNaN())
-        assertEquals(2f, grid.valueAt(grid.width - 2, 100))
+        // The expanded display grid preserves the original nodes every fourth sample.
+        val rowNearLegend = 608
+        assertTrue(grid.valueAt(grid.width - 1, rowNearLegend).isNaN())
+        assertEquals(2f, grid.valueAt(grid.width - 5, rowNearLegend))
     }
 
     @Test
@@ -132,7 +135,7 @@ class CwaQuantitativeForecastImageParserTest {
     }
 
     @Test
-    fun `display grid preserves its geographic extent and masks the chart frame`() {
+    fun `display grid extends to offshore islands and still masks the main chart frame`() {
         val grid = parser.toGrid(
             metadata = CwaQuantitativeForecastMetadata(
                 issuedAt = Instant.parse("2026-07-14T03:30:00Z"),
@@ -146,10 +149,55 @@ class CwaQuantitativeForecastImageParserTest {
         )
 
         assertEquals(21.72, grid.bounds.south, .0001)
-        assertEquals(25.52, grid.bounds.north, .0001)
-        assertTrue(grid.valueAt(80, 0).isNaN())
-        assertTrue(grid.valueAt(40, grid.height - 1).isNaN())
-        assertEquals(0f, grid.valueAt(0, grid.height - 1))
+        assertTrue(grid.bounds.north > 26.38)
+        assertTrue(grid.bounds.west < 118.21)
+        assertTrue(grid.valueAt(552, 208).isNaN())
+        assertTrue(grid.valueAt(392, grid.height - 1).isNaN())
+        assertEquals(0f, grid.valueAt(232, grid.height - 1))
+    }
+
+    @Test
+    fun `offshore chart panels follow their own scales and cannot paint the Taiwan Strait`() {
+        for (scale in listOf(1.0, 0.8)) {
+            val width = (1245 * scale).roundToInt()
+            val height = (1500 * scale).roundToInt()
+            val pixels = IntArray(width * height) { argb(237, 249, 254) }
+            fun paint(centerX: Int, centerY: Int, color: Int, radius: Int = 14) {
+                val columns = ((centerX - radius) * scale).roundToInt()..((centerX + radius) * scale).roundToInt()
+                val rows = ((centerY - radius) * scale).roundToInt()..((centerY + radius) * scale).roundToInt()
+                for (row in rows) for (column in columns) pixels[row * width + column] = color
+            }
+
+            // Reference chart pixels for distinct locations matched against the NLSC shoreline.
+            paint(259, 556, argb(156, 252, 255)) // Kinmen
+            paint(145, 601, argb(3, 200, 255)) // Lieyu
+            paint(152, 397, argb(5, 155, 255), radius = 6) // Narrow headland on Nangan.
+            paint(242, 328, argb(3, 99, 255)) // Beigan
+            paint(413, 283, argb(5, 153, 2)) // Dongyin
+            paint(390, 408, argb(57, 255, 3)) // Xiju
+            paint(229, 822, argb(255, 251, 3)) // Penghu (main chart)
+
+            val grid = parser.toGrid(
+                metadata = CwaQuantitativeForecastMetadata(Instant.EPOCH, "https://example.test/chart.png"),
+                imageWidth = width,
+                imageHeight = height,
+                argbPixels = pixels,
+                sourceId = "F-C0035-015",
+                endHour = 12,
+            )
+            assertEquals(1f, grid.sample(24.507, 118.438))
+            assertEquals(2f, grid.sample(24.429, 118.234))
+            assertEquals(5f, grid.sample(26.169467, 119.923158))
+            assertEquals(10f, grid.sample(26.224, 119.993))
+            assertEquals(15f, grid.sample(26.366, 120.488))
+            assertEquals(20f, grid.sample(25.975, 119.937))
+            assertEquals(30f, grid.sample(23.56, 119.6))
+
+            // Both inset blocks would produce rain here if read as part of the main chart.
+            assertTrue(grid.sampleForDisplayOrNaN(24.7177, 119.4192).isNaN())
+            assertTrue(grid.sampleForDisplayOrNaN(24.2922, 119.6921).isNaN())
+            assertNull(grid.sample(25.45, 118.7))
+        }
     }
 
     private fun argb(red: Int, green: Int, blue: Int): Int =

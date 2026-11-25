@@ -20,7 +20,7 @@ data class CwaQuantitativeForecastMetadata(
  * Only map pixels can contribute to a sample. Within the map frame, colors
  * matching CWA's rainfall legend become amounts, and dark coastlines or
  * annotations can be filled from nearby rainfall pixels.
- * The projection is calibrated to the main Taiwan panel.
+ * The main map and each offshore inset have independent geographic calibrations.
  */
 class CwaQuantitativeForecastImageParser {
     fun parseMetadata(json: String): CwaQuantitativeForecastMetadata {
@@ -46,28 +46,37 @@ class CwaQuantitativeForecastImageParser {
         require(endHour in 12..48 && endHour % 12 == 0)
         val xScale = imageWidth / REFERENCE_IMAGE_WIDTH
         val yScale = imageHeight / REFERENCE_IMAGE_HEIGHT
-        val map = ChartRegion(
-            ceil(MAP_LEFT * xScale).toInt()..floor(MAP_RIGHT * xScale).toInt(),
-            ceil(MAP_TOP * yScale).toInt()..floor(MAP_BOTTOM * yScale).toInt(),
-        )
-        val legend = ChartRegion(
-            floor(LEGEND_LEFT * xScale).toInt()..ceil(LEGEND_RIGHT * xScale).toInt(),
-            floor(LEGEND_TOP * yScale).toInt()..ceil(LEGEND_BOTTOM * yScale).toInt(),
-        )
-        val values = FloatArray(OUTPUT_WIDTH * OUTPUT_HEIGHT)
-        for (y in 0 until OUTPUT_HEIGHT) {
-            val latitude = GRID_BOUNDS.north -
-                y.toDouble() / (OUTPUT_HEIGHT - 1) * (GRID_BOUNDS.north - GRID_BOUNDS.south)
-            for (x in 0 until OUTPUT_WIDTH) {
-                val longitude = GRID_BOUNDS.west +
-                    x.toDouble() / (OUTPUT_WIDTH - 1) * (GRID_BOUNDS.east - GRID_BOUNDS.west)
-                val (referenceX, referenceY) = sourcePixel(longitude, latitude)
-                values[y * OUTPUT_WIDTH + x] = decodeSample(
-                    (referenceX * xScale).roundToInt(), (referenceY * yScale).roundToInt(),
-                    imageWidth, argbPixels, map, legend,
-                )
+        val values = FloatArray(OUTPUT_WIDTH * OUTPUT_HEIGHT) { Float.NaN }
+        val longitudes = DoubleArray(OUTPUT_WIDTH) { GRID_BOUNDS.east - (OUTPUT_WIDTH - 1 - it) * LONGITUDE_STEP }
+        val latitudes = DoubleArray(OUTPUT_HEIGHT) { GRID_BOUNDS.south + (OUTPUT_HEIGHT - 1 - it) * LATITUDE_STEP }
+
+        fun samplePanel(
+            bounds: GeoBounds,
+            frame: ChartRegion,
+            exclusions: List<ChartRegion> = emptyList(),
+            project: (longitude: Double, latitude: Double) -> Pair<Double, Double>,
+        ) {
+            val map = frame.scaled(xScale, yScale, outward = false)
+            val columns = longitudes.indices.filter { longitudes[it] in bounds.west..bounds.east }
+            for (y in latitudes.indices) {
+                val latitude = latitudes[y]
+                if (latitude !in bounds.south..bounds.north) continue
+                for (x in columns) {
+                    val (referenceX, referenceY) = project(longitudes[x], latitude)
+                    values[y * OUTPUT_WIDTH + x] = decodeSample(
+                        (referenceX * xScale).roundToInt(), (referenceY * yScale).roundToInt(),
+                        imageWidth, argbPixels, map, exclusions,
+                    )
+                }
             }
         }
+
+        val mainMapExclusions = MAIN_MAP_EXCLUSIONS.map { it.scaled(xScale, yScale, outward = true) }
+        samplePanel(MAIN_MAP_BOUNDS, MAIN_MAP_FRAME, mainMapExclusions, ::sourcePixel)
+        for (inset in OFFSHORE_INSETS) {
+            samplePanel(inset.bounds, inset.frame, project = inset::sourcePixel)
+        }
+
         return WeatherGrid(
             width = OUTPUT_WIDTH,
             height = OUTPUT_HEIGHT,
@@ -112,9 +121,9 @@ class CwaQuantitativeForecastImageParser {
         width: Int,
         pixels: IntArray,
         map: ChartRegion,
-        legend: ChartRegion? = null,
+        exclusions: List<ChartRegion> = emptyList(),
     ): Float {
-        if (!map.contains(centerX, centerY) || legend?.contains(centerX, centerY) == true) return Float.NaN
+        if (!map.contains(centerX, centerY) || exclusions.any { it.contains(centerX, centerY) }) return Float.NaN
         val centerPixel = pixels[centerY * width + centerX]
         decodeRain(centerPixel)?.let { return it }
         // Dry land (white) and the ocean background (light blue) indicate 0 mm.
@@ -126,7 +135,7 @@ class CwaQuantitativeForecastImageParser {
                 if (kotlin.math.abs(dx) != radius && kotlin.math.abs(dy) != radius) continue
                 val x = centerX + dx
                 val y = centerY + dy
-                if (!map.contains(x, y) || legend?.contains(x, y) == true) continue
+                if (!map.contains(x, y) || exclusions.any { it.contains(x, y) }) continue
                 decodeRain(pixels[y * width + x])?.let { value ->
                     total += value
                     count += 1
@@ -179,28 +188,105 @@ class CwaQuantitativeForecastImageParser {
 
     internal class ChartRegion(private val columns: IntRange, private val rows: IntRange) {
         fun contains(x: Int, y: Int): Boolean = x in columns && y in rows
+
+        fun scaled(xScale: Double, yScale: Double, outward: Boolean): ChartRegion {
+            fun scale(range: IntRange, factor: Double): IntRange {
+                val start = range.first * factor
+                val end = range.last * factor
+                return if (outward) floor(start).toInt()..ceil(end).toInt()
+                else ceil(start).toInt()..floor(end).toInt()
+            }
+            return ChartRegion(scale(columns, xScale), scale(rows, yScale))
+        }
+    }
+
+    private class ChartInset(
+        val bounds: GeoBounds,
+        val frame: ChartRegion,
+        private val longitudeOrigin: Double,
+        private val latitudeOrigin: Double,
+        private val pixelX: Double,
+        private val pixelY: Double,
+        private val xPerLongitude: Double,
+        private val xPerLatitude: Double,
+        private val yPerLongitude: Double,
+        private val yPerLatitude: Double,
+    ) {
+        fun sourcePixel(longitude: Double, latitude: Double): Pair<Double, Double> {
+            val dx = longitude - longitudeOrigin
+            val dy = latitude - latitudeOrigin
+            return (pixelX + xPerLongitude * dx + xPerLatitude * dy) to
+                (pixelY + yPerLongitude * dx + yPerLatitude * dy)
+        }
     }
 
     private companion object {
-        const val OUTPUT_WIDTH = 160
-        const val OUTPUT_HEIGHT = 212
+        // Quarter steps of the main map's original sampling grid (~500 m) preserve
+        // the shapes of the small Matsu islands. The forecast resolution is 2.5 km.
+        const val OUTPUT_WIDTH = 869
+        const val OUTPUT_HEIGHT = 1053
+        const val LONGITUDE_STEP = (122.2 - 119.2) / (4 * 159)
+        const val LATITUDE_STEP = (25.52 - 21.72) / (4 * 211)
+        val MAIN_MAP_BOUNDS = GeoBounds(south = 21.72, west = 119.2, north = 25.52, east = 122.2)
+        val GRID_BOUNDS = GeoBounds(
+            south = MAIN_MAP_BOUNDS.south,
+            west = MAIN_MAP_BOUNDS.east - (OUTPUT_WIDTH - 1) * LONGITUDE_STEP,
+            north = MAIN_MAP_BOUNDS.south + (OUTPUT_HEIGHT - 1) * LATITUDE_STEP,
+            east = MAIN_MAP_BOUNDS.east,
+        )
         const val REFERENCE_IMAGE_WIDTH = 1245.0
         const val REFERENCE_IMAGE_HEIGHT = 1500.0
-        // Interior pixels of the 1245 × 1500 CWA frame, excluding its antialiased strokes.
-        const val MAP_LEFT = 14
-        const val MAP_TOP = 154
-        const val MAP_RIGHT = 1229
-        const val MAP_BOTTOM = 1487
-        // The in-frame color bar uses the same colors as the precipitation field.
-        const val LEGEND_LEFT = 1157
-        const val LEGEND_TOP = 689
-        const val LEGEND_RIGHT = 1196
-        const val LEGEND_BOTTOM = 1406
+        val MAIN_MAP_FRAME = ChartRegion(14..1229, 154..1487)
+        val MAIN_MAP_EXCLUSIONS = listOf(
+            ChartRegion(1157..1196, 689..1406), // Rainfall color bar.
+            ChartRegion(89..501, 199..481), // Matsu inset block, including its frame.
+            ChartRegion(89..321, 499..661), // Kinmen inset and frame.
+        )
+
+        // Affine transforms fitted to NLSC TWD97 shorelines (data.gov.tw/dataset/7441)
+        // in the 1245 × 1500 F-C0035 charts. The pixel frames clip the geographic search bounds.
+        val OFFSHORE_INSETS = listOf(
+            // Nangan and Beigan (including Gaodeng).
+            ChartInset(
+                bounds = GeoBounds(south = 26.09, west = 119.87, north = 26.33, east = 120.06),
+                frame = ChartRegion(92..318, 202..478),
+                longitudeOrigin = 119.96, latitudeOrigin = 26.22,
+                pixelX = 199.22, pixelY = 333.26,
+                xPerLongitude = 1290.3, xPerLatitude = -15.9,
+                yPerLongitude = -10.1, yPerLatitude = -1255.7,
+            ),
+            // Dongyin and Xiyin.
+            ChartInset(
+                bounds = GeoBounds(south = 26.31, west = 120.41, north = 26.44, east = 120.56),
+                frame = ChartRegion(322..498, 202..343),
+                longitudeOrigin = 120.474, latitudeOrigin = 26.368,
+                pixelX = 394.56, pixelY = 280.30,
+                xPerLongitude = 1300.8, xPerLatitude = 53.3,
+                yPerLongitude = -6.1, yPerLatitude = -1301.7,
+            ),
+            // Dongju and Xiju.
+            ChartInset(
+                bounds = GeoBounds(south = 25.91, west = 119.88, north = 26.03, east = 120.03),
+                frame = ChartRegion(322..498, 347..478),
+                longitudeOrigin = 119.966, latitudeOrigin = 25.969,
+                pixelX = 426.48, pixelY = 415.27,
+                xPerLongitude = 1268.7, xPerLatitude = 0.0,
+                yPerLongitude = -10.7, yPerLatitude = -1299.0,
+            ),
+            // Kinmen and Lieyu.
+            ChartInset(
+                bounds = GeoBounds(south = 24.32, west = 118.13, north = 24.61, east = 118.55),
+                frame = ChartRegion(92..318, 502..658),
+                longitudeOrigin = 118.33, latitudeOrigin = 24.45,
+                pixelX = 198.49, pixelY = 588.89,
+                xPerLongitude = 561.1, xPerLatitude = -5.9,
+                yPerLongitude = 1.7, yPerLatitude = -573.5,
+            ),
+        )
         const val MIN_ALPHA = 240
         const val MAX_CHANNEL_TOLERANCE = 2
         const val MAX_INPAINT_RADIUS = 3
         const val OFFICIAL_GRID_RESOLUTION_KM = 2.5
-        val GRID_BOUNDS = GeoBounds(south = 21.72, west = 119.2, north = 25.52, east = 122.2)
 
         // Pixel-to-WGS84 affine calibration for the 1245 × 1500 F-C0035 chart.
         // Coordinates scale with the chart dimensions before this inverse is used.
