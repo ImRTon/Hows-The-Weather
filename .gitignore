@@ -7,3 +7,4 @@ secrets.properties
 *.iml
 gradle/gradle-daemon-jvm.properties
 .kotlin/
+brag-output/
